@@ -61,3 +61,26 @@ def render_odds(o: dict) -> str:
     out.append(line("All past signals", o["all_signals"]))
     out.append(f"  Win = {o['target']}. Period: {o['period']}. {o['note']}")
     return "\n".join(out)
+
+
+def render_forecast(f: dict) -> str:
+    from datetime import datetime, timezone
+    if "error" in f:
+        return f"  Forecast: {f['error']}"
+    t0 = datetime.fromtimestamp(f["target_candle_open"], timezone.utc).strftime("%H:%M")
+    t1 = datetime.fromtimestamp(f["target_candle_close"], timezone.utc).strftime("%H:%M")
+    t = f["model_test"]
+    out = ["=" * 72, f"  NEXT {f['timeframe']} CANDLE {t0}-{t1} UTC · {f['symbol']} @ {_fmt(f['price'])}",
+           f"  >>> {f['action']} <<<   UP {f['probability_up']:.0%} / DOWN {f['probability_down']:.0%}"]
+    if t.get("calls"):
+        lo, hi = t["call_accuracy_95ci"]
+        out.append(f"  Model on recent unseen candles: {t['call_accuracy']:.0%} right on {t['calls']} calls "
+                   f"(95% range {lo:.0%}-{hi:.0%}; always-guess-majority = {t['majority_baseline']:.0%}) "
+                   f"-> {'EDGE' if f['has_edge'] else 'NO PROVEN EDGE'}")
+    out += [f"  - {r}" for r in f["reasons"]] + [f"  ! {v}" for v in f["vetoes"]]
+    out.append("  Drivers: " + ", ".join(f"{d['feature']} → {d['push']}" for d in f["drivers"]))
+    if f["plan"]:
+        p = f["plan"]
+        out.append(f"  Entry {_fmt(p['entry'])} · stop {_fmt(p['stop_loss'])} · target {_fmt(p['take_profit'])} · {p['exit']}")
+    out.append(f"  {DISCLAIMER}")
+    return "\n".join(out)

@@ -10,12 +10,37 @@ screenshots and give a senior-trader second opinion that includes a live news ch
 > number, this app **measures** how its own signals performed on the same coin and timeframe in recent
 > history, and shows the range of uncertainty. Test it with paper trading first. This is not financial advice.
 
+## Next-candle forecast (the main screen)
+
+Choose a coin and a timeframe, for example **BTCUSDT on 1m**. At the top of the Live tab you get:
+
+- **LONG / SHORT / NO TRADE** for the candle that is starting now, plus a countdown to its close
+- **UP x% / DOWN y%**: the probability for that candle
+- **Proven edge right now? YES/NO**: whether the forecast model beat a simple guess on recent candles of
+  this coin that it never trained on (it must be statistically above 50%, not just lucky)
+- What's driving the forecast, plus entry, stop and target for a one-candle trade
+- A **live track record**: every LONG/SHORT call is graded automatically when its candle closes
+
+With "Re-run agents: Every candle close" (the default), it refreshes by itself at every close, so on 1m you get a new call every minute.
+
+How the % is computed: the agents' signals become features (trend, momentum, price action, volume,
+taker flow, higher-timeframe trend) for the last ~1000 candles. A logistic regression learns how they
+related to the next candle's direction, and a walk-forward test on unseen candles decides whether the model has an edge.
+It only says LONG/SHORT when the probability is at least 55% **and** the edge is proven **and** neither live order flow nor the Chief Strategist strongly disagrees.
+
+> One-candle moves, especially on 1m, are close to random, so honest probabilities are usually 50–60%.
+> On 1m and 5m, a typical candle often moves less than trading fees cost, which makes it very hard to profit even when the direction is right.
+> The card shows this comparison for you.
+
+CLI: `python -m crypto_agents next BTCUSDT --tf 1m --watch` prints a new forecast at every candle close.
+
 ## Features
 
 | Feature | Where |
 |---|---|
 | Live TradingView chart (RSI + MACD) | Live tab |
 | Live order flow, updated **every second**: taker buy/sell pressure (10 s / 60 s), order-book imbalance, a 60-second pressure strip and a candle-close countdown | Live tab (Binance WebSocket, straight from your browser) |
+| **Next-candle forecast**: LONG/SHORT/NO TRADE + UP/DOWN %, proven-edge check, auto-refresh at each candle close, live track record | Live tab (top), `/api/next` |
 | Multi-agent analysis on 1m / 5m / 15m / 1h / 4h / 1d. Re-runs every 5/10/30/60 s or on every candle close. | Live tab, `/api/analyze` |
 | Strategy selection by market regime: trend continuation, breakout, range / mean reversion, developing trend | every decision |
 | **Measured** win/loss odds: chance that price is up or down after the signal window, plus the win rate of past signals with a 95% confidence range | Live tab, `/api/odds` |
@@ -108,6 +133,7 @@ crypto_agents/
   agents/              trend, momentum, structure, orderflow, sentiment, risk
   strategist.py        combines the agents, picks a strategy, sets signal expiry
   odds.py              measured win/loss odds (look-ahead-free replay)
+  forecast.py          next-candle forecast: learned probability + walk-forward edge test
   ai.py                Claude chart-vision and senior-trader agents
   backtest.py          longer walk-forward backtest (CLI)
   report.py            console output

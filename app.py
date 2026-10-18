@@ -12,6 +12,7 @@ import numpy as np
 from flask import Flask, Response, jsonify, request
 
 from crypto_agents import Strategist, ai, data
+from crypto_agents.forecast import next_candle
 from crypto_agents.odds import historical_odds
 from crypto_agents.report import DISCLAIMER
 from crypto_agents.web_page import PAGE
@@ -60,10 +61,12 @@ def normalize_symbol(raw: str) -> str:
     return s
 
 
-def _snapshot(a: dict, orderflow: bool = True):
+def _snapshot(a: dict, orderflow: bool = True, limit: int = 500):
     if a["demo"]:
-        return data.demo_snapshot(a["symbol"], a["tf"])
-    return data.fetch_snapshot(a["symbol"], a["tf"], orderflow=orderflow)
+        snap = data.demo_snapshot(a["symbol"], a["tf"])
+        snap.candles[a["tf"]] = snap.candles[a["tf"]].tail(limit)
+        return snap
+    return data.fetch_snapshot(a["symbol"], a["tf"], limit=limit, orderflow=orderflow)
 
 
 def _decision_json(d) -> dict:
@@ -110,6 +113,16 @@ def analyze():
     a = _args()
     d = Strategist(a["account"], a["risk"]).decide(_snapshot(a))
     return jsonify(_decision_json(d))
+
+
+@app.get("/api/next")
+@_errors
+def next_trade():
+    """All agents + the next-candle forecast in one call: LONG / SHORT / NO TRADE for the candle starting now."""
+    a = _args()
+    snap = _snapshot(a, limit=1000)
+    d = Strategist(a["account"], a["risk"]).decide(snap)
+    return jsonify(_clean({"forecast": next_candle(snap, d), "decision": _decision_json(d)}))
 
 
 @app.get("/api/odds")

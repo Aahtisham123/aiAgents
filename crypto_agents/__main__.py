@@ -3,8 +3,9 @@ import sys
 
 from . import data
 from .backtest import backtest
+from .forecast import next_candle
 from .odds import historical_odds
-from .report import DISCLAIMER, render, render_odds
+from .report import DISCLAIMER, render, render_forecast, render_odds
 from .strategist import Strategist
 
 
@@ -20,6 +21,12 @@ def main(argv=None) -> int:
     a.add_argument("--tf", default="1h", choices=list(data.PROFILES), help="entry timeframe (default 1h)")
     a.add_argument("--no-odds", action="store_true", help="skip the historical win/loss odds")
 
+    nx = sub.add_parser("next", help="LONG / SHORT / NO TRADE for the next candle, with probability")
+    nx.add_argument("symbol")
+    nx.add_argument("--tf", default="1m", choices=list(data.PROFILES))
+    nx.add_argument("--demo", action="store_true")
+    nx.add_argument("--watch", action="store_true", help="repeat at every candle close")
+
     s = sub.add_parser("scan", help="rank the most traded coins (or your list) and show the best setups")
     s.add_argument("symbols", nargs="*", help="default: top coins by 24h volume")
     s.add_argument("--top", type=int, default=20)
@@ -31,7 +38,7 @@ def main(argv=None) -> int:
     b.add_argument("--demo", action="store_true", help="use synthetic data")
     b.add_argument("--target-r", type=float, default=2.0)
 
-    for sp in (a, s, b):
+    for sp in (a, nx, s, b):
         sp.add_argument("--account", type=float, default=1000.0, help="account size in USDT")
         sp.add_argument("--risk", type=float, default=1.0, help="%% of account risked per trade")
     args = p.parse_args(argv)
@@ -50,6 +57,17 @@ def main(argv=None) -> int:
             if not args.no_odds:
                 print(render_odds(historical_odds(snap, d.score, d.action, strat)))
         return 0
+
+    if args.cmd == "next":
+        import time
+        while True:
+            snap = data.demo_snapshot(args.symbol.upper(), args.tf) if args.demo else \
+                data.fetch_snapshot(args.symbol, args.tf, limit=1000)
+            print(render_forecast(next_candle(snap, strat.decide(snap))), flush=True)
+            if not args.watch:
+                return 0
+            step = data.TF_SECONDS[args.tf]
+            time.sleep(step - time.time() % step + 1)
 
     if args.cmd == "scan":
         results = []

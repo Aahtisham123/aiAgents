@@ -56,6 +56,11 @@ th:nth-child(-n+3),td:nth-child(-n+3){text-align:left}
 .md p{margin:6px 0}.md ul{margin:4px 0}
 .dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--none);margin-right:6px}
 .dot.on{background:var(--long)}
+.next{border-width:2px}.next.LONGb{border-color:var(--long)}.next.SHORTb{border-color:var(--short)}
+.big{font-size:44px;font-weight:800;letter-spacing:.5px;line-height:1.1}
+.prob{display:flex;justify-content:space-between;font-weight:700;font-size:18px;margin-top:8px}
+.chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}.chip{background:var(--chip);border-radius:999px;padding:2px 10px;font-size:13px}
+.dots{display:flex;gap:4px;flex-wrap:wrap;margin-top:6px}.dots i{width:12px;height:12px;border-radius:50%;display:inline-block}
 </style>
 </head>
 <body>
@@ -77,7 +82,7 @@ th:nth-child(-n+3),td:nth-child(-n+3){text-align:left}
   <label>Account (USDT)<input id="account" type="number" value="1000" min="1" step="any"></label>
   <label>Risk / trade %<input id="risk" type="number" value="1" min="0.05" max="10" step="any"></label>
   <label>Re-run agents<select id="auto">
-    <option value="0">Manual</option><option value="close">Every candle close</option>
+    <option value="0">Manual</option><option value="close" selected>Every candle close</option>
     <option value="5">Every 5 s</option><option value="10">Every 10 s</option>
     <option value="30">Every 30 s</option><option value="60">Every 60 s</option></select></label>
   <label class="check"><input id="demo" type="checkbox">Demo data</label>
@@ -85,6 +90,7 @@ th:nth-child(-n+3),td:nth-child(-n+3){text-align:left}
   <button id="aibtn" type="button" class="secondary hidden">AI senior trader review</button>
 </form></div>
 
+<div id="next"></div>
 <div id="tv"></div>
 
 <div class="card">
@@ -145,7 +151,10 @@ const TV_INTERVAL = {"1m":"1","5m":"5","15m":"15","1h":"60","4h":"240","1d":"D"}
 const TF_SEC = {"1m":60,"5m":300,"15m":900,"1h":3600,"4h":14400,"1d":86400};
 let CONFIG = {ai:false};
 
-for (const sel of ["tf","s-tf","x-tf"]) for (const t of TFS) sel === "x-tf" ? $(sel).add(new Option(t,t)) : $(sel).add(new Option(t,t,t==="5m",t==="5m"));
+for (const sel of ["tf","s-tf","x-tf"]) for (const t of TFS) {
+  const def = sel === "tf" ? "1m" : "5m";
+  $(sel).add(sel === "x-tf" ? new Option(t,t) : new Option(t,t,t===def,t===def));
+}
 try { const saved = JSON.parse(localStorage.getItem("cta") || "{}");
   for (const k of ["symbol","tf","account","risk"]) if (saved[k]) $(k).value = saved[k]; } catch(e) {}
 
@@ -196,7 +205,7 @@ function connect(sym, tf){
     else if (stream.includes("@depth")) book = data;
     else if (stream.includes("@kline")) {
       const closedNow = data.k.x && kline && !kline.x; kline = data.k;
-      if (closedNow && $("auto").value === "close") runAnalysis(true);
+      if (closedNow) { gradeForecast(sym, tf, data.k); if ($("auto").value === "close") setTimeout(() => runAnalysis(true), 800); }
     }
   };
   ws.onclose = () => { $("wsdot").classList.remove("on");
@@ -230,7 +239,73 @@ setInterval(() => {
     history.push(score); history = history.slice(-60);
     $("ticks").innerHTML = history.map(v => `<i style="background:${v > 0.1 ? "var(--long)" : v < -0.1 ? "var(--short)" : "var(--border)"};opacity:${0.35 + Math.min(Math.abs(v), 1) * 0.65}"></i>`).join("");
   }
+  if (lastForecast && $("nx-left") && $("demo").checked) $("nx-left").textContent = "demo data";
+  else if (lastForecast && $("nx-left")) {
+    const left = Math.round(lastForecast.target_candle_close - now / 1000);
+    $("nx-left").textContent = left > 0 ? `closes in ${left >= 3600 ? Math.floor(left/3600) + "h " + Math.floor(left%3600/60) + "m" : Math.floor(left/60) + ":" + String(left%60).padStart(2,"0")}` : "candle closed, updating…";
+  }
 }, 1000);
+
+// ---------------------------------------------------------------- next-candle forecast + live track record
+let lastForecast = null;
+const sbKey = (sym, tf) => `cta-sb-${sym}-${tf}`;
+const loadSB = (sym, tf) => { try { return JSON.parse(localStorage.getItem(sbKey(sym, tf)) || "[]"); } catch(e) { return []; } };
+const saveSB = (sym, tf, rows) => { try { localStorage.setItem(sbKey(sym, tf), JSON.stringify(rows.slice(-50))); } catch(e) {} };
+
+function recordForecast(f){
+  if (f.action === "NO TRADE" || $("demo").checked) return;
+  const rows = loadSB(f.symbol, f.timeframe), open = Math.round(f.target_candle_open * 1000);
+  if (rows.some(r => r.open === open)) return;
+  rows.push({open, call:f.action, p:f.action === "LONG" ? f.probability_up : f.probability_down, late:f.seconds_elapsed > 0.3 * (f.target_candle_close - f.target_candle_open)});
+  saveSB(f.symbol, f.timeframe, rows);
+}
+
+function gradeForecast(sym, tf, k){
+  const rows = loadSB(sym, tf), r = rows.find(x => x.open === k.t && x.result == null);
+  if (!r) return;
+  r.result = +k.c > +k.o ? "UP" : +k.c < +k.o ? "DOWN" : "FLAT";
+  r.correct = (r.call === "LONG" && r.result === "UP") || (r.call === "SHORT" && r.result === "DOWN");
+  saveSB(sym, tf, rows);
+  if (lastForecast && lastForecast.symbol === sym && lastForecast.timeframe === tf) $("nx-sb").innerHTML = scoreboard(sym, tf);
+}
+
+function scoreboard(sym, tf){
+  const graded = loadSB(sym, tf).filter(r => r.result);
+  if (!graded.length) return '<span class="muted">No graded calls yet. Each LONG/SHORT call is checked automatically when its candle closes, while this page is open.</span>';
+  const ok = graded.filter(r => r.correct).length;
+  return `<b>${ok} of ${graded.length} correct (${Math.round(ok / graded.length * 100)}%)</b> <span class="muted">· ${esc(sym)} ${esc(tf)}, this browser</span>
+    <div class="dots">${graded.slice(-30).map(r => `<i title="${new Date(r.open).toLocaleTimeString()} ${r.call} → ${r.result}" style="background:${r.correct ? "var(--long)" : "var(--short)"}"></i>`).join("")}</div>`;
+}
+
+function renderForecast(f){
+  lastForecast = f.error ? null : f;
+  if (f.error) { $("next").innerHTML = `<div class="card warn">${esc(f.error)}</div>`; return; }
+  recordForecast(f);
+  const t = f.model_test, hhmm = s => new Date(s * 1000).toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"});
+  const cls = f.action === "NO TRADE" ? "NO" : f.action;
+  const acc = t.calls ? `${pct(t.call_accuracy)} right on ${t.calls} calls <span class="muted">(95% range ${pct(t.call_accuracy_95ci[0])}–${pct(t.call_accuracy_95ci[1])}; always guessing the usual direction scores ${pct(t.majority_baseline)})</span>` : "not enough calls to test";
+  $("next").innerHTML = `<div class="card next ${cls}b" id="next-card">
+    <div class="agent-head"><h2>Next ${esc(f.timeframe)} candle · ${esc(f.symbol)} · ${hhmm(f.target_candle_open)}–${hhmm(f.target_candle_close)}</h2>
+      <span class="pill NEUTRAL" id="nx-left"></span></div>
+    <div class="big ${cls}">${esc(f.action)}</div>
+    <div class="prob"><span class="UP">UP ${pct(f.probability_up)}</span><span class="DOWN">DOWN ${pct(f.probability_down)}</span></div>
+    <div class="meter"><span style="width:${(f.probability_up * 100).toFixed(1)}%"></span></div>
+    <div class="grid">
+      <div class="kv"><b>Model check on recent candles it never saw</b><span>${acc}</span></div>
+      <div class="kv"><b>Proven edge right now?</b><span class="${f.has_edge ? "UP" : "DOWN"}">${f.has_edge ? "YES" : "NO"}</span></div>
+      <div class="kv"><b>Typical ${esc(f.timeframe)} move vs fees</b><span>${f.typical_move_pct.toFixed(3)}% vs ${f.fees_round_trip_pct.toFixed(2)}%</span></div>
+    </div>
+    ${f.reasons.length ? `<ul>${f.reasons.map(r => `<li>${esc(r)}</li>`).join("")}</ul>` : ""}
+    ${f.vetoes.length ? `<div class="warn"><b>Why no trade</b><ul>${f.vetoes.map(v => `<li>${esc(v)}</li>`).join("")}</ul></div>` : ""}
+    <h3>What is driving the forecast</h3>
+    <div class="chips">${f.drivers.map(d => `<span class="chip"><span class="${d.push}">${d.push === "UP" ? "▲" : "▼"}</span> ${esc(d.feature)}</span>`).join("")}</div>
+    ${f.plan ? `<div class="grid"><div class="kv"><b>Entry</b><span>${num(f.plan.entry)}</span></div>
+      <div class="kv"><b>Stop-loss (1 ATR)</b><span>${num(f.plan.stop_loss)}</span></div>
+      <div class="kv"><b>Target (1 ATR)</b><span>${num(f.plan.take_profit)}</span></div></div>
+      <p class="muted">Exit: ${esc(f.plan.exit)}.</p>` : ""}
+    <h3>Live track record</h3><div id="nx-sb">${scoreboard(f.symbol, f.timeframe)}</div>
+    <p class="muted">${esc(f.note)} Trained on ${f.trained_on} candles. All agents' votes are below.</p></div>`;
+}
 
 // ---------------------------------------------------------------- analysis
 let busy = false, autoTimer = null, lastOddsKey = "", lastOddsAt = 0, lastDecision = null;
@@ -312,10 +387,11 @@ async function runAnalysis(silent){
   const sym = $("symbol").value.trim().toUpperCase(), tf = $("tf").value;
   try { localStorage.setItem("cta", JSON.stringify({symbol:sym, tf, account:$("account").value, risk:$("risk").value})); } catch(e) {}
   if (!silent) { $("go").disabled = true; if (!lastDecision || lastDecision.symbol !== sym || lastDecision.timeframe !== tf)
-    $("out").innerHTML = '<div class="card">The agents are analyzing live market data…</div>'; }
+    { $("next").innerHTML = ""; $("out").innerHTML = '<div class="card">All agents are analyzing live market data and forecasting the next candle…</div>'; } }
   try {
-    const d = await getJSON("/api/analyze?" + params({symbol:sym, tf}));
+    const j = await getJSON("/api/next?" + params({symbol:sym, tf})), d = j.decision;
     if (lastDecision && (lastDecision.symbol !== d.symbol || lastDecision.timeframe !== d.timeframe)) { lastOddsKey = ""; $("out").innerHTML = ""; }
+    renderForecast(j.forecast);
     renderDecision(d);
     loadOdds(d.symbol, tf);
   } catch(e) { if (!silent) $("out").innerHTML = `<div class="card err">${esc(e.message)}</div>`; }
@@ -444,6 +520,7 @@ $("x-go").onclick = async () => {
 };
 
 startLive();
+if (!$("demo").checked) runAnalysis(false);
 </script>
 </body>
 </html>
