@@ -18,7 +18,7 @@ from crypto_agents.report import DISCLAIMER
 from crypto_agents.web_page import PAGE
 
 app = Flask(__name__)
-app.config["MAX_CONTENT_LENGTH"] = 6 * 1024 * 1024  # screenshots are resized in the browser first
+app.config["MAX_CONTENT_LENGTH"] = 4 * 1024 * 1024  # Vercel caps request bodies at 4.5 MB
 
 
 def _clean(x):
@@ -115,21 +115,33 @@ def analyze():
     return jsonify(_decision_json(d))
 
 
-@app.get("/api/next")
+@app.route("/api/next", methods=["GET", "POST"])
 @_errors
 def next_trade():
-    """All agents + the next-candle forecast in one call: LONG / SHORT / NO TRADE for the candle starting now."""
-    a = _args()
-    snap = _snapshot(a, limit=1000)
+    """All agents + the next-candle forecast in one call: LONG or SHORT for the candle starting now, with a %.
+
+    POST: the browser sends the live Binance candles it fetched itself (works even if Binance blocks this
+    server's region). GET: the server fetches the data.
+    """
+    body = request.get_json(silent=True) if request.method == "POST" else None
+    a = _args(body if body is not None else None)
+    if body and body.get("live") and not a["demo"]:
+        snap = data.snapshot_from_browser(a["symbol"], a["tf"], body["live"])
+    else:
+        snap = _snapshot(a, limit=1000)
     d = Strategist(a["account"], a["risk"]).decide(snap)
     return jsonify(_clean({"forecast": next_candle(snap, d), "decision": _decision_json(d)}))
 
 
-@app.get("/api/odds")
+@app.route("/api/odds", methods=["GET", "POST"])
 @_errors
 def odds():
-    a = _args()
-    snap = _snapshot(a, orderflow=False)
+    body = request.get_json(silent=True) if request.method == "POST" else None
+    a = _args(body if body is not None else None)
+    if body and body.get("live") and not a["demo"]:
+        snap = data.snapshot_from_browser(a["symbol"], a["tf"], {"klines": body["live"]["klines"]}, context=False)
+    else:
+        snap = _snapshot(a, orderflow=False)
     strat = Strategist(a["account"], a["risk"])
     d = strat.decide(snap)
     return jsonify(_clean(historical_odds(snap, d.score, d.action, strat)))

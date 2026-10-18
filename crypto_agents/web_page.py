@@ -246,17 +246,48 @@ setInterval(() => {
   }
 }, 1000);
 
+// ---------------------------------------------------------------- live data straight from Binance (in the browser)
+const PROFILES = {"1m":["15m","5m","1m"],"5m":["1h","15m","5m"],"15m":["4h","1h","15m"],"1h":["1d","4h","1h"],"4h":["1w","1d","4h"],"1d":["1w","1d"]};
+const REST_HOSTS = ["https://api.binance.com", "https://data-api.binance.vision"];
+let restHost = 0;
+
+async function binance(path){
+  let last;
+  for (let i = 0; i < REST_HOSTS.length; i++) {
+    const host = REST_HOSTS[(restHost + i) % REST_HOSTS.length];
+    try {
+      const r = await fetch(host + path);
+      if (r.status === 400) throw Object.assign(new Error("Unknown symbol on Binance"), {fatal:true});
+      if (!r.ok) throw new Error(`${host} answered ${r.status}`);
+      restHost = (restHost + i) % REST_HOSTS.length;
+      return await r.json();
+    } catch(e) { if (e.fatal) throw e; last = e; }
+  }
+  throw last;
+}
+
+async function fetchLive(sym, tf){
+  const kl = await Promise.all(PROFILES[tf].map(t => binance(`/api/v3/klines?symbol=${sym}&interval=${t}&limit=1000`)));
+  const [depth, trades] = await Promise.all([
+    binance(`/api/v3/depth?symbol=${sym}&limit=500`).catch(() => null),
+    binance(`/api/v3/aggTrades?symbol=${sym}&limit=1000`).catch(() => null)]);
+  const klines = {};
+  PROFILES[tf].forEach((t, i) => klines[t] = kl[i].map(k => [k[0], +k[1], +k[2], +k[3], +k[4], +k[5], +k[9]]));
+  return {klines, depth, trades: trades && trades.map(t => ({p:t.p, q:t.q, m:t.m, T:t.T}))};
+}
+
 // ---------------------------------------------------------------- next-candle forecast + live track record
 let lastForecast = null;
-const sbKey = (sym, tf) => `cta-sb-${sym}-${tf}`;
+const sbKey = (sym, tf) => `cta-sb2-${sym}-${tf}`;
 const loadSB = (sym, tf) => { try { return JSON.parse(localStorage.getItem(sbKey(sym, tf)) || "[]"); } catch(e) { return []; } };
-const saveSB = (sym, tf, rows) => { try { localStorage.setItem(sbKey(sym, tf), JSON.stringify(rows.slice(-50))); } catch(e) {} };
+const saveSB = (sym, tf, rows) => { try { localStorage.setItem(sbKey(sym, tf), JSON.stringify(rows.slice(-100))); } catch(e) {} };
 
 function recordForecast(f){
-  if (f.action === "NO TRADE" || $("demo").checked) return;
+  if ($("demo").checked) return;
   const rows = loadSB(f.symbol, f.timeframe), open = Math.round(f.target_candle_open * 1000);
-  if (rows.some(r => r.open === open)) return;
-  rows.push({open, call:f.action, p:f.action === "LONG" ? f.probability_up : f.probability_down, late:f.seconds_elapsed > 0.3 * (f.target_candle_close - f.target_candle_open)});
+  const row = {open, call:f.direction, chance:f.chance, strength:f.strength};
+  const i = rows.findIndex(r => r.open === open);
+  if (i >= 0) { if (rows[i].result == null) rows[i] = row; } else rows.push(row);  // keep the latest call before the candle closes
   saveSB(f.symbol, f.timeframe, rows);
 }
 
@@ -266,45 +297,49 @@ function gradeForecast(sym, tf, k){
   r.result = +k.c > +k.o ? "UP" : +k.c < +k.o ? "DOWN" : "FLAT";
   r.correct = (r.call === "LONG" && r.result === "UP") || (r.call === "SHORT" && r.result === "DOWN");
   saveSB(sym, tf, rows);
-  if (lastForecast && lastForecast.symbol === sym && lastForecast.timeframe === tf) $("nx-sb").innerHTML = scoreboard(sym, tf);
+  if (lastForecast && lastForecast.symbol === sym && lastForecast.timeframe === tf && $("nx-sb")) $("nx-sb").innerHTML = scoreboard(sym, tf);
 }
 
 function scoreboard(sym, tf){
   const graded = loadSB(sym, tf).filter(r => r.result);
-  if (!graded.length) return '<span class="muted">No graded calls yet. Each LONG/SHORT call is checked automatically when its candle closes, while this page is open.</span>';
-  const ok = graded.filter(r => r.correct).length;
-  return `<b>${ok} of ${graded.length} correct (${Math.round(ok / graded.length * 100)}%)</b> <span class="muted">· ${esc(sym)} ${esc(tf)}, this browser</span>
-    <div class="dots">${graded.slice(-30).map(r => `<i title="${new Date(r.open).toLocaleTimeString()} ${r.call} → ${r.result}" style="background:${r.correct ? "var(--long)" : "var(--short)"}"></i>`).join("")}</div>`;
+  if (!graded.length) return '<span class="muted">Every prediction is checked automatically when its candle closes, while this page is open. Results will appear here.</span>';
+  const line = (rows, label) => { if (!rows.length) return ""; const ok = rows.filter(r => r.correct).length;
+    return `<div><b>${label}: ${ok} of ${rows.length} right (${Math.round(ok / rows.length * 100)}%)</b></div>`; };
+  return line(graded, "All predictions") + line(graded.filter(r => r.strength !== "WEAK"), "STRONG + MODERATE only") +
+    `<div class="dots">${graded.slice(-40).map(r => `<i title="${new Date(r.open).toLocaleTimeString()} ${r.call} (${r.strength}) → ${r.result}" style="background:${r.correct ? "var(--long)" : "var(--short)"};opacity:${r.strength === "WEAK" ? .45 : 1}"></i>`).join("")}</div>
+    <span class="muted">${esc(sym)} ${esc(tf)}, saved in this browser. Faded dots = WEAK calls.</span>`;
 }
 
-function renderForecast(f){
-  lastForecast = f.error ? null : f;
-  if (f.error) { $("next").innerHTML = `<div class="card warn">${esc(f.error)}</div>`; return; }
+function renderForecastError(msg){
+  $("next").innerHTML = `<div class="card next err" id="next-card"><h2>Couldn't make a prediction</h2><p>${esc(msg)}</p>
+    <p class="muted">The page retries automatically at the next candle close. You can also press Analyze.</p></div>`;
+}
+
+function renderForecast(f, source){
+  if (f.error) { lastForecast = null; renderForecastError(f.error); return; }
+  lastForecast = f;
   recordForecast(f);
   const t = f.model_test, hhmm = s => new Date(s * 1000).toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"});
-  const cls = f.action === "NO TRADE" ? "NO" : f.action;
-  const acc = t.calls ? `${pct(t.call_accuracy)} right on ${t.calls} calls <span class="muted">(95% range ${pct(t.call_accuracy_95ci[0])}–${pct(t.call_accuracy_95ci[1])}; always guessing the usual direction scores ${pct(t.majority_baseline)})</span>` : "not enough calls to test";
-  $("next").innerHTML = `<div class="card next ${cls}b" id="next-card">
+  const arrow = f.direction === "LONG" ? "▲" : "▼";
+  const sCls = f.strength === "STRONG" ? "UP" : f.strength === "MODERATE" ? "WAIT" : "DOWN";
+  const acc = t.calls ? `${pct(t.call_accuracy)} right on ${t.calls} recent test calls` : "not enough test calls yet";
+  $("next").innerHTML = `<div class="card next ${f.direction}b" id="next-card">
     <div class="agent-head"><h2>Next ${esc(f.timeframe)} candle · ${esc(f.symbol)} · ${hhmm(f.target_candle_open)}–${hhmm(f.target_candle_close)}</h2>
       <span class="pill NEUTRAL" id="nx-left"></span></div>
-    <div class="big ${cls}">${esc(f.action)}</div>
+    <div class="big ${f.direction}">${arrow} ${esc(f.direction)} <span style="font-size:.55em">${pct(f.chance)} chance</span></div>
+    <div style="margin:6px 0 2px"><span class="pill ${sCls}">${esc(f.strength)}</span> ${esc(f.advice)}</div>
     <div class="prob"><span class="UP">UP ${pct(f.probability_up)}</span><span class="DOWN">DOWN ${pct(f.probability_down)}</span></div>
     <div class="meter"><span style="width:${(f.probability_up * 100).toFixed(1)}%"></span></div>
-    <div class="grid">
-      <div class="kv"><b>Model check on recent candles it never saw</b><span>${acc}</span></div>
-      <div class="kv"><b>Proven edge right now?</b><span class="${f.has_edge ? "UP" : "DOWN"}">${f.has_edge ? "YES" : "NO"}</span></div>
-      <div class="kv"><b>Typical ${esc(f.timeframe)} move vs fees</b><span>${f.typical_move_pct.toFixed(3)}% vs ${f.fees_round_trip_pct.toFixed(2)}%</span></div>
-    </div>
-    ${f.reasons.length ? `<ul>${f.reasons.map(r => `<li>${esc(r)}</li>`).join("")}</ul>` : ""}
-    ${f.vetoes.length ? `<div class="warn"><b>Why no trade</b><ul>${f.vetoes.map(v => `<li>${esc(v)}</li>`).join("")}</ul></div>` : ""}
-    <h3>What is driving the forecast</h3>
-    <div class="chips">${f.drivers.map(d => `<span class="chip"><span class="${d.push}">${d.push === "UP" ? "▲" : "▼"}</span> ${esc(d.feature)}</span>`).join("")}</div>
-    ${f.plan ? `<div class="grid"><div class="kv"><b>Entry</b><span>${num(f.plan.entry)}</span></div>
-      <div class="kv"><b>Stop-loss (1 ATR)</b><span>${num(f.plan.stop_loss)}</span></div>
-      <div class="kv"><b>Target (1 ATR)</b><span>${num(f.plan.take_profit)}</span></div></div>
-      <p class="muted">Exit: ${esc(f.plan.exit)}.</p>` : ""}
+    <h3>Why</h3><ul>${f.why.map(w => `<li>${esc(w)}</li>`).join("")}</ul>
+    ${f.patterns.length ? `<div class="chips">${f.patterns.map(p => `<span class="chip"><span class="${p.bias}">${p.bias === "UP" ? "▲" : p.bias === "DOWN" ? "▼" : "•"}</span> ${esc(p.name)}</span>`).join("")}</div>` : ""}
+    ${f.warnings.length ? `<div class="warn"><ul>${f.warnings.map(w => `<li>${esc(w)}</li>`).join("")}</ul></div>` : ""}
+    <div class="grid"><div class="kv"><b>Entry</b><span>${num(f.plan.entry)}</span></div>
+      <div class="kv"><b>Stop-loss</b><span>${num(f.plan.stop_loss)}</span></div>
+      <div class="kv"><b>Target</b><span>${num(f.plan.take_profit)}</span></div>
+      <div class="kv"><b>Recent accuracy</b><span>${acc}</span></div></div>
+    <p class="muted">Exit: ${esc(f.plan.exit)}.</p>
     <h3>Live track record</h3><div id="nx-sb">${scoreboard(f.symbol, f.timeframe)}</div>
-    <p class="muted">${esc(f.note)} Trained on ${f.trained_on} candles. All agents' votes are below.</p></div>`;
+    <p class="muted">${esc(f.note)} Data: ${esc(source)} · updated ${new Date().toLocaleTimeString()}.</p></div>`;
 }
 
 // ---------------------------------------------------------------- analysis
@@ -372,29 +407,40 @@ function renderOdds(o){
     <p class="muted">Win means ${esc(o.target)} within ${o.horizon_candles} candles. Tested on ${o.windows_tested} recent candles (${esc(o.period)}). ${esc(o.note)}</p></div>`;
 }
 
-async function loadOdds(sym, tf){
+async function loadOdds(sym, tf, live){
   const key = sym + tf + $("demo").checked;
   if (key === lastOddsKey && Date.now() - lastOddsAt < 300000) return;
   lastOddsKey = key; lastOddsAt = Date.now();
   if ($("odds")) $("odds").innerHTML = '<div class="card muted" id="odds-card">Measuring historical win/loss odds for this setup…</div>';
-  try { const o = await getJSON("/api/odds?" + params({symbol:sym, tf}));
+  try { const o = await getJSON("/api/odds", {method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({symbol:sym, tf, account:$("account").value, risk:$("risk").value, demo:$("demo").checked ? "1" : "0", live})});
     if ($("odds")) $("odds").innerHTML = renderOdds(o);
   } catch(e) { lastOddsKey = ""; if ($("odds")) $("odds").innerHTML = `<div class="card err" id="odds-card">${esc(e.message)}</div>`; }
 }
 
 async function runAnalysis(silent){
   if (busy) return; busy = true;
-  const sym = $("symbol").value.trim().toUpperCase(), tf = $("tf").value;
+  const sym = $("symbol").value.trim().toUpperCase().replace(/[^A-Z0-9]/g, ""), tf = $("tf").value, demo = $("demo").checked;
   try { localStorage.setItem("cta", JSON.stringify({symbol:sym, tf, account:$("account").value, risk:$("risk").value})); } catch(e) {}
-  if (!silent) { $("go").disabled = true; if (!lastDecision || lastDecision.symbol !== sym || lastDecision.timeframe !== tf)
-    { $("next").innerHTML = ""; $("out").innerHTML = '<div class="card">All agents are analyzing live market data and forecasting the next candle…</div>'; } }
+  $("go").disabled = true;
+  if (!lastForecast || lastForecast.symbol !== sym || lastForecast.timeframe !== tf) {
+    $("next").innerHTML = '<div class="card next">Fetching live candles and asking all agents for the next candle…</div>';
+    $("out").innerHTML = "";
+  }
   try {
-    const j = await getJSON("/api/next?" + params({symbol:sym, tf})), d = j.decision;
+    let live = null, source = demo ? "demo data" : "Binance via the server";
+    if (!demo) {
+      try { live = await fetchLive(sym, tf); source = "live Binance candles fetched by your browser"; }
+      catch(e) { if (e.fatal) throw new Error(`${sym} is not a Binance spot pair. Try e.g. BTCUSDT, ETHUSDT or SOLUSDT.`); }
+    }
+    const body = {symbol:sym, tf, account:$("account").value, risk:$("risk").value, demo: demo ? "1" : "0", live};
+    const j = await getJSON("/api/next", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)});
+    const d = j.decision;
     if (lastDecision && (lastDecision.symbol !== d.symbol || lastDecision.timeframe !== d.timeframe)) { lastOddsKey = ""; $("out").innerHTML = ""; }
-    renderForecast(j.forecast);
+    renderForecast(j.forecast, source);
     renderDecision(d);
-    loadOdds(d.symbol, tf);
-  } catch(e) { if (!silent) $("out").innerHTML = `<div class="card err">${esc(e.message)}</div>`; }
+    loadOdds(d.symbol, tf, live);
+  } catch(e) { renderForecastError(e.message); }
   finally { busy = false; $("go").disabled = false; }
 }
 

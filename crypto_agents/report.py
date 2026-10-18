@@ -71,16 +71,15 @@ def render_forecast(f: dict) -> str:
     t1 = datetime.fromtimestamp(f["target_candle_close"], timezone.utc).strftime("%H:%M")
     t = f["model_test"]
     out = ["=" * 72, f"  NEXT {f['timeframe']} CANDLE {t0}-{t1} UTC · {f['symbol']} @ {_fmt(f['price'])}",
-           f"  >>> {f['action']} <<<   UP {f['probability_up']:.0%} / DOWN {f['probability_down']:.0%}"]
+           f"  >>> {f['direction']} — {f['chance']:.0%} chance · {f['strength']} <<<",
+           f"  {f['advice']}"]
+    out += [f"  • {w}" for w in f["why"]]
     if t.get("calls"):
         lo, hi = t["call_accuracy_95ci"]
-        out.append(f"  Model on recent unseen candles: {t['call_accuracy']:.0%} right on {t['calls']} calls "
-                   f"(95% range {lo:.0%}-{hi:.0%}; always-guess-majority = {t['majority_baseline']:.0%}) "
-                   f"-> {'EDGE' if f['has_edge'] else 'NO PROVEN EDGE'}")
-    out += [f"  - {r}" for r in f["reasons"]] + [f"  ! {v}" for v in f["vetoes"]]
-    out.append("  Drivers: " + ", ".join(f"{d['feature']} → {d['push']}" for d in f["drivers"]))
-    if f["plan"]:
-        p = f["plan"]
-        out.append(f"  Entry {_fmt(p['entry'])} · stop {_fmt(p['stop_loss'])} · target {_fmt(p['take_profit'])} · {p['exit']}")
+        out.append(f"  Recent accuracy on unseen candles: {t['call_accuracy']:.0%} on {t['calls']} calls "
+                   f"(95% range {lo:.0%}-{hi:.0%})")
+    out += [f"  ! {w}" for w in f["warnings"]]
+    p = f["plan"]
+    out.append(f"  Entry {_fmt(p['entry'])} · stop {_fmt(p['stop_loss'])} · target {_fmt(p['take_profit'])} · {p['exit']}")
     out.append(f"  {DISCLAIMER}")
     return "\n".join(out)

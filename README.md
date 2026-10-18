@@ -10,29 +10,45 @@ screenshots and give a senior-trader second opinion that includes a live news ch
 > number, this app **measures** how its own signals performed on the same coin and timeframe in recent
 > history, and shows the range of uncertainty. Test it with paper trading first. This is not financial advice.
 
-## Next-candle forecast (the main screen)
+## Next-candle prediction (the main screen)
 
-Choose a coin and a timeframe, for example **BTCUSDT on 1m**. At the top of the Live tab you get:
+Open the site, type a coin (e.g. **BTCUSDT**) and pick a timeframe (e.g. **1m**). The top card tells you:
 
-- **LONG / SHORT / NO TRADE** for the candle that is starting now, plus a countdown to its close
-- **UP x% / DOWN y%**: the probability for that candle
-- **Proven edge right now? YES/NO**: whether the forecast model beat a simple guess on recent candles of
-  this coin that it never trained on (it must be statistically above 50%, not just lucky)
-- What's driving the forecast, plus entry, stop and target for a one-candle trade
-- A **live track record**: every LONG/SHORT call is graded automatically when its candle closes
+```
+Next 1m candle · BTCUSDT · 21:19–21:20          closes in 0:47
+▲ LONG  57% chance                              [MODERATE] Possible trade: use a small size
+Why
+ • Candle pattern on the last closed candle: Bullish engulfing
+ • Pattern match: in the 40 most similar past setups, the next candle went up 25 times and down 15 → 61% up
+ • Indicator model: 54% up — pushing up: higher-timeframe trend, taker buying
+ • Live order flow agrees: buyers are aggressive right now
+Entry · Stop-loss · Target · Recent accuracy
+Live track record: 31 of 52 right (60%)
+```
 
-With "Re-run agents: Every candle close" (the default), it refreshes by itself at every close, so on 1m you get a new call every minute.
+- It **always** gives a direction (LONG or SHORT) and a % chance.
+- The **strength** label tells you whether to act:
+  **STRONG** (≥58%, has beaten chance on recent unseen candles, both methods agree), **MODERATE** (≥55% with a proven edge),
+  **WEAK** (close to a coin flip, so skip).
+- It refreshes by itself at **every candle close**, so on 1m you get a new prediction every minute.
+- Every prediction is graded automatically when its candle closes. The **live track record** shows how often it has been right in your browser.
 
-How the % is computed: the agents' signals become features (trend, momentum, price action, volume,
-taker flow, higher-timeframe trend) for the last ~1000 candles. A logistic regression learns how they
-related to the next candle's direction, and a walk-forward test on unseen candles decides whether the model has an edge.
-It only says LONG/SHORT when the probability is at least 55% **and** the edge is proven **and** neither live order flow nor the Chief Strategist strongly disagrees.
+**Live data:** your browser fetches the candles, order book and trades directly from Binance and sends them to
+the agents, so predictions work even when Binance blocks the hosting server's region. If that fails, the server fetches the data itself.
+
+**How the % is computed** (all on this coin's own last ~1000 candles):
+1. Candlestick patterns: engulfing, hammer, shooting star, doji, three soldiers/crows, inside bar, 20-candle breakouts
+2. Pattern matching: the 40 past moments whose recent candles looked most like now, and what the next candle did
+3. An indicator model that learns from the agents' signals (trend, momentum, price action, volume, taker flow, higher-timeframe trend)
+4. The two are blended, each weighted by how accurate it was on held-out recent candles
+5. A walk-forward test on candles the method never saw decides whether there is a proven edge
+6. Live order flow and the Chief Strategist can downgrade a call they strongly disagree with
 
 > One-candle moves, especially on 1m, are close to random, so honest probabilities are usually 50–60%.
-> On 1m and 5m, a typical candle often moves less than trading fees cost, which makes it very hard to profit even when the direction is right.
-> The card shows this comparison for you.
+> On pure random data this system labels every call WEAK. It doesn't invent an edge.
+> On 1m and 5m a typical candle often moves less than trading fees cost, and the card warns you when that's the case.
 
-CLI: `python -m crypto_agents next BTCUSDT --tf 1m --watch` prints a new forecast at every candle close.
+CLI: `python -m crypto_agents next BTCUSDT --tf 1m --watch` prints a new prediction at every candle close.
 
 ## Features
 
@@ -40,7 +56,7 @@ CLI: `python -m crypto_agents next BTCUSDT --tf 1m --watch` prints a new forecas
 |---|---|
 | Live TradingView chart (RSI + MACD) | Live tab |
 | Live order flow, updated **every second**: taker buy/sell pressure (10 s / 60 s), order-book imbalance, a 60-second pressure strip and a candle-close countdown | Live tab (Binance WebSocket, straight from your browser) |
-| **Next-candle forecast**: LONG/SHORT/NO TRADE + UP/DOWN %, proven-edge check, auto-refresh at each candle close, live track record | Live tab (top), `/api/next` |
+| **Next-candle prediction**: LONG/SHORT + % chance + STRONG/MODERATE/WEAK, candlestick patterns, pattern matching, auto-refresh at each candle close, live track record | Live tab (top), `/api/next` |
 | Multi-agent analysis on 1m / 5m / 15m / 1h / 4h / 1d. Re-runs every 5/10/30/60 s or on every candle close. | Live tab, `/api/analyze` |
 | Strategy selection by market regime: trend continuation, breakout, range / mean reversion, developing trend | every decision |
 | **Measured** win/loss odds: chance that price is up or down after the signal window, plus the win rate of past signals with a 95% confidence range | Live tab, `/api/odds` |
@@ -133,7 +149,7 @@ crypto_agents/
   agents/              trend, momentum, structure, orderflow, sentiment, risk
   strategist.py        combines the agents, picks a strategy, sets signal expiry
   odds.py              measured win/loss odds (look-ahead-free replay)
-  forecast.py          next-candle forecast: learned probability + walk-forward edge test
+  forecast.py          next-candle prediction: candlestick patterns, pattern matching, indicator model, edge test
   ai.py                Claude chart-vision and senior-trader agents
   backtest.py          longer walk-forward backtest (CLI)
   report.py            console output

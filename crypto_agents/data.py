@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -102,21 +103,29 @@ def _spot(path: str, params: dict | None = None, ttl: float = 0):
 # ---------------------------------------------------------------- live data
 
 def fetch_klines(symbol: str, interval: str, limit: int = 500) -> pd.DataFrame:
-    rows = _spot("/api/v3/klines", {"symbol": symbol, "interval": interval, "limit": limit}, ttl=2)
-    df = pd.DataFrame(
-        rows,
-        columns=["open_time", "open", "high", "low", "close", "volume",
-                 "close_time", "qv", "trades", "tbb", "tbq", "ignore"],
-    )
-    df = df[["open_time", "open", "high", "low", "close", "volume", "tbb"]].astype(float)
-    df = df.rename(columns={"tbb": "taker_buy_volume"})
+    return klines_to_df(_spot("/api/v3/klines", {"symbol": symbol, "interval": interval, "limit": limit}, ttl=2))
+
+
+def klines_to_df(rows: list) -> pd.DataFrame:
+    """Binance kline rows (or the first 6-7 fields of them: time, o, h, l, c, v[, taker buy volume])."""
+    if not rows:
+        raise ValueError("No candles received")
+    rows = [list(r[:6]) + [r[9] if len(r) > 9 else r[6] if len(r) == 7 else 0] for r in rows]
+    df = pd.DataFrame(rows, columns=["open_time", "open", "high", "low", "close", "volume", "taker_buy_volume"]).astype(float)
     df.index = pd.to_datetime(df.pop("open_time"), unit="ms", utc=True)
+    if not df.index.is_monotonic_increasing or df[["open", "high", "low", "close"]].le(0).any().any():
+        raise ValueError("Candles are malformed")
     return df
 
 
 def fetch_orderflow(symbol: str) -> dict:
     """Order-book imbalance and taker buy/sell flow from the most recent ~1000 trades."""
     book = _spot("/api/v3/depth", {"symbol": symbol, "limit": 500}, ttl=1)
+    trades = _spot("/api/v3/aggTrades", {"symbol": symbol, "limit": 1000}, ttl=1)
+    return orderflow_from(book, trades)
+
+
+def orderflow_from(book: dict, trades: list) -> dict:
     bids = np.array(book["bids"], dtype=float)
     asks = np.array(book["asks"], dtype=float)
     mid = (bids[0, 0] + asks[0, 0]) / 2
@@ -131,7 +140,8 @@ def fetch_orderflow(symbol: str) -> dict:
     bid1, ask1 = depth(bids, 1.0), depth(asks, 1.0)
     bid02, ask02 = depth(bids, 0.2), depth(asks, 0.2)
 
-    trades = _spot("/api/v3/aggTrades", {"symbol": symbol, "limit": 1000}, ttl=1)
+    if not trades:
+        raise ValueError("No trades received")
     qty = np.array([float(t["q"]) * float(t["p"]) for t in trades])
     is_sell = np.array([t["m"] for t in trades])  # buyer is maker -> the aggressor sold
     buy, sell = float(qty[~is_sell].sum()), float(qty[is_sell].sum())
@@ -149,9 +159,9 @@ def fetch_orderflow(symbol: str) -> dict:
     }
 
 
-def fetch_market_context() -> dict | None:
+def fetch_market_context(timeout: int = 10) -> dict | None:
     try:
-        g = _get(COINGECKO_GLOBAL, ttl=300)["data"]
+        g = _get(COINGECKO_GLOBAL, timeout=timeout, ttl=300)["data"]
         return {"market_cap_change_24h": float(g["market_cap_change_percentage_24h_usd"]),
                 "btc_dominance": float(g["market_cap_percentage"]["btc"])}
     except Exception:  # noqa: BLE001
@@ -164,6 +174,36 @@ def fetch_snapshot(symbol: str = "BTCUSDT", timeframe: str = "1h", limit: int = 
     if timeframe not in PROFILES:
         raise ValueError(f"Unsupported timeframe {timeframe!r}. Use one of {', '.join(PROFILES)}")
     snap = MarketSnapshot(symbol, {tf: fetch_klines(symbol, tf, limit) for tf in PROFILES[timeframe]})
+    add_context(snap, orderflow=orderflow)
+    return snap
+
+
+def snapshot_from_browser(symbol: str, timeframe: str, payload: dict, context: bool = True) -> MarketSnapshot:
+    """Live data the user's browser fetched from Binance itself (works even when the server is geo-blocked).
+
+    payload = {"klines": {tf: [[openTime, o, h, l, c, v, takerBuyVol], ...]}, "depth": {...}, "trades": [...]}
+    """
+    if timeframe not in PROFILES:
+        raise ValueError(f"Unsupported timeframe {timeframe!r}")
+    kl = payload.get("klines") or {}
+    missing = [tf for tf in PROFILES[timeframe] if not kl.get(tf)]
+    if missing:
+        raise ValueError(f"Missing candles for {', '.join(missing)}")
+    snap = MarketSnapshot(symbol.upper(), {tf: klines_to_df(kl[tf][-1000:]) for tf in PROFILES[timeframe]})
+    snap.notes.append("Live candles fetched by your browser from Binance")
+    if payload.get("depth") and payload.get("trades"):
+        try:
+            snap.orderflow = orderflow_from(payload["depth"], payload["trades"][-1000:])
+        except Exception as exc:  # noqa: BLE001
+            snap.notes.append(f"order flow unavailable ({exc.__class__.__name__})")
+    if context:
+        add_context(snap, orderflow=snap.orderflow is None, timeout=4)
+    return snap
+
+
+def add_context(snap: MarketSnapshot, orderflow: bool = True, timeout: int = 6) -> None:
+    """Optional extras (derivatives, sentiment, order flow): the agents work without them."""
+    symbol, timeframe = snap.symbol, snap.entry_timeframe
     period = "5m" if timeframe in ("1m", "5m", "15m") else "1h"
 
     # Everything below is optional: the agents still work without it.
@@ -174,24 +214,36 @@ def fetch_snapshot(symbol: str = "BTCUSDT", timeframe: str = "1h", limit: int = 
             snap.notes.append(f"{label} unavailable ({exc.__class__.__name__})")
             return None
 
-    snap.funding_rate = optional("funding rate", lambda: float(_get(
-        f"{BINANCE_FUTURES}/fapi/v1/premiumIndex", {"symbol": symbol}, ttl=30)["lastFundingRate"]))
+    def funding():
+        return float(_get(f"{BINANCE_FUTURES}/fapi/v1/premiumIndex", {"symbol": symbol},
+                          timeout=timeout, ttl=30)["lastFundingRate"])
 
     def oi_change():
         oi = _get(f"{BINANCE_FUTURES}/futures/data/openInterestHist",
-                  {"symbol": symbol, "period": period, "limit": 25}, ttl=30)
+                  {"symbol": symbol, "period": period, "limit": 25}, timeout=timeout, ttl=30)
         first, last = float(oi[0]["sumOpenInterest"]), float(oi[-1]["sumOpenInterest"])
         return (last - first) / first * 100
-    snap.open_interest_change = optional("open interest", oi_change)
-    snap.long_short_ratio = optional("long/short ratio", lambda: float(_get(
-        f"{BINANCE_FUTURES}/futures/data/globalLongShortAccountRatio",
-        {"symbol": symbol, "period": period, "limit": 1}, ttl=30)[-1]["longShortRatio"]))
-    snap.fear_greed = optional("fear & greed index", lambda: int(_get(FEAR_GREED, ttl=600)["data"][0]["value"]))
-    snap.market = fetch_market_context()
-    if orderflow:
-        snap.orderflow = optional("order flow", lambda: fetch_orderflow(symbol))
-    return snap
 
+    def long_short():
+        return float(_get(f"{BINANCE_FUTURES}/futures/data/globalLongShortAccountRatio",
+                          {"symbol": symbol, "period": period, "limit": 1}, timeout=timeout, ttl=30)[-1]["longShortRatio"])
+
+    def fear_greed():
+        return int(_get(FEAR_GREED, timeout=timeout, ttl=600)["data"][0]["value"])
+
+    jobs = {"funding rate": funding, "open interest": oi_change, "long/short ratio": long_short,
+            "fear & greed index": fear_greed, "market context": lambda: fetch_market_context(timeout)}
+    if orderflow:
+        jobs["order flow"] = lambda: fetch_orderflow(symbol)
+    with ThreadPoolExecutor(max_workers=len(jobs)) as pool:  # run in parallel so one slow host can't stall us
+        futures = {label: pool.submit(optional, label, fn) for label, fn in jobs.items()}
+    snap.funding_rate = futures["funding rate"].result()
+    snap.open_interest_change = futures["open interest"].result()
+    snap.long_short_ratio = futures["long/short ratio"].result()
+    snap.fear_greed = futures["fear & greed index"].result()
+    snap.market = futures["market context"].result()
+    if orderflow:
+        snap.orderflow = futures["order flow"].result()
 
 def top_symbols(n: int = 20, quote: str = "USDT") -> list[dict]:
     """The most traded spot pairs by 24h quote volume (stablecoins and leveraged tokens excluded)."""
