@@ -8,7 +8,8 @@ import numpy as np
 import pandas as pd
 import requests
 
-BINANCE_SPOT = "https://api.binance.com"
+# Tried in order. Binance blocks some regions (e.g. US servers); the others are fallbacks.
+SPOT_HOSTS = ("https://api.binance.com", "https://data-api.binance.vision", "https://api.binance.us")
 BINANCE_FUTURES = "https://fapi.binance.com"
 FEAR_GREED = "https://api.alternative.me/fng/?limit=2"
 
@@ -42,7 +43,20 @@ def _get(url: str, params: dict | None = None, timeout: int = 10):
 
 
 def fetch_klines(symbol: str, interval: str, limit: int = 500) -> pd.DataFrame:
-    rows = _get(f"{BINANCE_SPOT}/api/v3/klines", {"symbol": symbol, "interval": interval, "limit": limit})
+    params = {"symbol": symbol, "interval": interval, "limit": limit}
+    errors = []
+    for host in SPOT_HOSTS:
+        try:
+            rows = _get(f"{host}/api/v3/klines", params)
+            break
+        except requests.HTTPError as exc:
+            if exc.response is not None and exc.response.status_code == 400:
+                raise ValueError(f"Unknown symbol {symbol!r}") from exc
+            errors.append(f"{host}: {exc}")
+        except requests.RequestException as exc:
+            errors.append(f"{host}: {exc}")
+    else:
+        raise ConnectionError("Could not reach any market data source: " + "; ".join(errors))
     df = pd.DataFrame(
         rows,
         columns=["open_time", "open", "high", "low", "close", "volume",

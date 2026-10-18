@@ -35,10 +35,29 @@ You can also feed them a CSV exported from TradingView.
 ## Setup
 
 ```bash
-pip install -r requirements.txt
+pip install -r requirements-dev.txt
 ```
 
 No API keys are needed. Everything uses public market data.
+
+## Web app
+
+```bash
+python app.py          # open http://localhost:5000
+```
+
+API endpoints:
+- `GET /api/analyze?symbol=BTCUSDT&account=1000&risk=1`: full multi-agent decision as JSON
+- `GET /api/scan?symbols=BTCUSDT,ETHUSDT&account=1000&risk=1`: ranked setups
+- Add `&demo=1` to use synthetic data
+
+### Deploy to Vercel
+
+Import the repo in Vercel. No settings are needed: `app.py` is the entrypoint, and `vercel.json` pins the
+function to the Frankfurt region (`fra1`). Keep that pin, because Binance blocks requests from US servers
+(Vercel's default region is Washington, D.C.). The app also falls back to `data-api.binance.vision` and
+`api.binance.us` for candles. If futures/sentiment data is unavailable, the Sentiment agent abstains
+and the other agents still work.
 
 ## Usage
 
@@ -72,12 +91,15 @@ python -m crypto_agents backtest --demo
 ## Tests
 
 ```bash
+pip install -r requirements-dev.txt
 python -m pytest -q
 ```
 
 ## Project layout
 
 ```
+app.py             web app + JSON API (Vercel entrypoint)
+vercel.json        pins the deployment to a non-US region
 crypto_agents/
   data.py          live Binance data, Fear & Greed, CSV loader, synthetic data
   indicators.py    RSI, MACD, Stoch RSI, ADX, ATR, Bollinger, VWAP, OBV, swing levels
@@ -85,4 +107,5 @@ crypto_agents/
   strategist.py    combines the agents into a decision
   backtest.py      walk-forward backtest
   report.py        console report
+  web_page.py      browser UI
 ```
