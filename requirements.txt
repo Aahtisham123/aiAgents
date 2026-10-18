@@ -1,4 +1,6 @@
+anthropic>=1.15
 flask>=3.0
 numpy>=1.26
 pandas>=2.1
+pydantic>=2.7
 requests>=2.31

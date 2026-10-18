@@ -9,7 +9,7 @@ def _fmt(x: float) -> str:
 
 
 def render(d: Decision) -> str:
-    out = ["=" * 72, f"  {d.symbol} — MULTI-AGENT ANALYSIS", "=" * 72]
+    out = ["=" * 72, f"  {d.symbol} {d.timeframe} — MULTI-AGENT ANALYSIS (price {_fmt(d.price)})", "=" * 72]
     for r in d.reports:
         bias = "" if r.agent == "Risk Manager" else f" [{r.bias} {r.score:+.2f}]"
         out.append(f"\n▶ {r.agent}{bias} (confidence {r.confidence:.0%})")
@@ -20,6 +20,7 @@ def render(d: Decision) -> str:
     out.append(f"  Combined score: {d.score:+.2f}   Setup quality: {d.setup_quality}/100 "
                f"(checklist score, not a win probability)")
     out += [f"  - {x}" for x in d.reasons]
+    out += [f"  Strategy: {d.strategy} — {d.playbook}", f"  Signal valid for: {d.horizon_text}"]
     if d.plan:
         p = d.plan
         out += [
@@ -38,4 +39,25 @@ def render(d: Decision) -> str:
     if d.warnings:
         out += ["", "  Warnings:"] + [f"  ! {w}" for w in d.warnings]
     out += ["", f"  {DISCLAIMER}", "=" * 72]
+    return "\n".join(out)
+
+
+def render_odds(o: dict) -> str:
+    if "error" in o:
+        return f"  Odds: {o['error']}"
+
+    def line(label, x):
+        if not x or not x["signals"]:
+            return f"  {label}: no signals"
+        lo, hi = x["win_rate_95ci"]
+        return (f"  {label}: {x['win_rate']:.0%} won ({x['wins']}W/{x['losses']}L/{x['timeouts']} expired "
+                f"of {x['signals']}; 95% range {lo:.0%}-{hi:.0%}; avg {x['avg_r']:+.2f}R)")
+
+    out = ["", "  MEASURED ODDS (recent history of this coin & timeframe)",
+           f"  Chance price is higher after {o['horizon_candles']} candles: {o['chance_up']:.0%} "
+           f"(from {o['chance_samples']} moments with {o['chance_basis']}; normal up-rate {o['base_rate_up']:.0%})"]
+    if o.get("same_direction"):
+        out.append(line("Past signals in this direction", o["same_direction"]))
+    out.append(line("All past signals", o["all_signals"]))
+    out.append(f"  Win = {o['target']}. Period: {o['period']}. {o['note']}")
     return "\n".join(out)

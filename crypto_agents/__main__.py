@@ -3,7 +3,8 @@ import sys
 
 from . import data
 from .backtest import backtest
-from .report import DISCLAIMER, render
+from .odds import historical_odds
+from .report import DISCLAIMER, render, render_odds
 from .strategist import Strategist
 
 
@@ -14,12 +15,15 @@ def main(argv=None) -> int:
 
     a = sub.add_parser("analyze", help="analyze one or more symbols with live Binance data")
     a.add_argument("symbols", nargs="+", help="e.g. BTCUSDT ETHUSDT SOLUSDT")
-    a.add_argument("--csv", help="use a TradingView/exchange hourly OHLCV CSV instead of live data")
+    a.add_argument("--csv", help="use a TradingView/exchange OHLCV CSV (candles of --tf) instead of live data")
     a.add_argument("--demo", action="store_true", help="use synthetic data (offline demo)")
+    a.add_argument("--tf", default="1h", choices=list(data.PROFILES), help="entry timeframe (default 1h)")
+    a.add_argument("--no-odds", action="store_true", help="skip the historical win/loss odds")
 
-    s = sub.add_parser("scan", help="rank many symbols and show only the tradeable setups")
-    s.add_argument("symbols", nargs="*", default=["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
-                                                   "DOGEUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT"])
+    s = sub.add_parser("scan", help="rank the most traded coins (or your list) and show the best setups")
+    s.add_argument("symbols", nargs="*", help="default: top coins by 24h volume")
+    s.add_argument("--top", type=int, default=20)
+    s.add_argument("--tf", default="1h", choices=list(data.PROFILES))
 
     b = sub.add_parser("backtest", help="measure the real historical win rate")
     b.add_argument("--symbol", default="BTCUSDT")
@@ -36,19 +40,22 @@ def main(argv=None) -> int:
     if args.cmd == "analyze":
         for sym in args.symbols:
             if args.demo:
-                snap = data.snapshot_from_hourly(sym.upper(), data.synthetic_candles())
+                snap = data.demo_snapshot(sym.upper(), args.tf)
             elif args.csv:
-                snap = data.snapshot_from_hourly(sym.upper(), data.load_csv(args.csv))
+                snap = data.snapshot_from_base(sym.upper(), data.load_csv(args.csv), args.tf)
             else:
-                snap = data.fetch_snapshot(sym)
-            print(render(strat.decide(snap)))
+                snap = data.fetch_snapshot(sym, args.tf)
+            d = strat.decide(snap)
+            print(render(d))
+            if not args.no_odds:
+                print(render_odds(historical_odds(snap, d.score, d.action, strat)))
         return 0
 
     if args.cmd == "scan":
         results = []
-        for sym in args.symbols:
+        for sym in args.symbols or [r["symbol"] for r in data.top_symbols(args.top)]:
             try:
-                results.append(strat.decide(data.fetch_snapshot(sym)))
+                results.append(strat.decide(data.fetch_snapshot(sym, args.tf)))
             except Exception as exc:  # noqa: BLE001
                 print(f"{sym}: skipped ({exc})", file=sys.stderr)
         results.sort(key=lambda d: (d.action == "NO TRADE", -d.setup_quality))

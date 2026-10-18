@@ -63,6 +63,19 @@ class SentimentAgent(Agent):
             else:
                 reasons.append(f"Fear & Greed {fg} — no extreme")
 
+        if snap.market is not None:
+            inputs += 1
+            mc, dom = snap.market["market_cap_change_24h"], snap.market["btc_dominance"]
+            if mc > 3:
+                s += 0.15
+                reasons.append(f"Total crypto market cap {mc:+.1f}% in 24h — risk-on market")
+            elif mc < -3:
+                s -= 0.15
+                reasons.append(f"Total crypto market cap {mc:+.1f}% in 24h — risk-off market")
+            else:
+                reasons.append(f"Total crypto market cap {mc:+.1f}% in 24h")
+            reasons.append(f"BTC dominance {dom:.1f}%")
+
         if not inputs:
             return AgentReport(self.name, 0, 0, "No sentiment/derivatives data available — abstaining")
         score = clamp(s)

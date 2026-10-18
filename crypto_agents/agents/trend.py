@@ -2,7 +2,8 @@ from ..data import MarketSnapshot
 from ..indicators import adx, ema
 from .base import Agent, AgentReport, clamp
 
-TF_WEIGHTS = {"1w": 0.35, "1d": 0.5, "4h": 0.3, "1h": 0.2, "15m": 0.1, "5m": 0.05}
+# Higher timeframe first, so the bigger picture counts most.
+POSITION_WEIGHTS = (0.5, 0.3, 0.2)
 
 
 class TrendAgent(Agent):
@@ -13,8 +14,8 @@ class TrendAgent(Agent):
 
     def analyze(self, snap: MarketSnapshot) -> AgentReport:
         total, weight_sum, reasons, per_tf = 0.0, 0.0, [], {}
-        strengths = []
-        for tf, df in snap.candles.items():
+        strengths, entry_adx = [], None
+        for pos, (tf, df) in enumerate(snap.candles.items()):
             if len(df) < 60:
                 continue
             c = df["close"]
@@ -31,7 +32,8 @@ class TrendAgent(Agent):
             s *= 0.5 + 0.5 * strength
             strengths.append(strength)
 
-            w = TF_WEIGHTS.get(tf, 0.2)
+            entry_adx = float(a)
+            w = POSITION_WEIGHTS[min(pos, len(POSITION_WEIGHTS) - 1)]
             total += s * w
             weight_sum += w
             label = "UP" if s > 0.15 else "DOWN" if s < -0.15 else "SIDEWAYS"
@@ -50,4 +52,4 @@ class TrendAgent(Agent):
         summary = ("All timeframes aligned " + labels[0]) if aligned else "Timeframes disagree: " + ", ".join(
             f"{tf} {v}" for tf, v in per_tf.items()
         )
-        return AgentReport(self.name, score, confidence, summary, reasons, {"per_timeframe": per_tf})
+        return AgentReport(self.name, score, confidence, summary, reasons, {"per_timeframe": per_tf, "entry_adx": entry_adx})
