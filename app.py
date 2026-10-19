@@ -69,6 +69,19 @@ def _snapshot(a: dict, orderflow: bool = True, limit: int = 500):
     return data.fetch_snapshot(a["symbol"], a["tf"], limit=limit, orderflow=orderflow)
 
 
+def _request_snapshot(limit: int = 1000, orderflow: bool = True, context: bool = True):
+    """Market data for this request: the live Binance data the browser POSTed (preferred — works even when
+    Binance blocks this server's region), otherwise fetched by the server."""
+    body = request.get_json(silent=True) if request.method == "POST" else None
+    a = _args(body if body is not None else None)
+    live = (body or {}).get("live")
+    if live and not a["demo"]:
+        if not context:
+            live = {"klines": live.get("klines")}
+        return a, data.snapshot_from_browser(a["symbol"], a["tf"], live, context=context)
+    return a, _snapshot(a, orderflow=orderflow, limit=limit)
+
+
 def _decision_json(d) -> dict:
     out = asdict(d)
     for r, rep in zip(out["reports"], d.reports):
@@ -123,12 +136,7 @@ def next_trade():
     POST: the browser sends the live Binance candles it fetched itself (works even if Binance blocks this
     server's region). GET: the server fetches the data.
     """
-    body = request.get_json(silent=True) if request.method == "POST" else None
-    a = _args(body if body is not None else None)
-    if body and body.get("live") and not a["demo"]:
-        snap = data.snapshot_from_browser(a["symbol"], a["tf"], body["live"])
-    else:
-        snap = _snapshot(a, limit=1000)
+    a, snap = _request_snapshot()
     d = Strategist(a["account"], a["risk"]).decide(snap)
     return jsonify(_clean({"forecast": next_candle(snap, d), "decision": _decision_json(d)}))
 
@@ -136,12 +144,7 @@ def next_trade():
 @app.route("/api/odds", methods=["GET", "POST"])
 @_errors
 def odds():
-    body = request.get_json(silent=True) if request.method == "POST" else None
-    a = _args(body if body is not None else None)
-    if body and body.get("live") and not a["demo"]:
-        snap = data.snapshot_from_browser(a["symbol"], a["tf"], {"klines": body["live"]["klines"]}, context=False)
-    else:
-        snap = _snapshot(a, orderflow=False)
+    a, snap = _request_snapshot(orderflow=False, context=False)
     strat = Strategist(a["account"], a["risk"])
     d = strat.decide(snap)
     return jsonify(_clean(historical_odds(snap, d.score, d.action, strat)))
@@ -177,17 +180,17 @@ def scan():
     return jsonify(_clean({"timeframe": a["tf"], "results": results, "disclaimer": DISCLAIMER}))
 
 
-@app.get("/api/ai-review")
+@app.route("/api/ai-review", methods=["GET", "POST"])
 @_errors
 def ai_review():
     if not ai.available():
         return jsonify(error="AI is not configured. Add ANTHROPIC_API_KEY in your Vercel environment variables."), 400
-    a = _args()
-    snap = _snapshot(a)
-    strat = Strategist(a["account"], a["risk"])
-    d = strat.decide(snap)
+    a, snap = _request_snapshot()
+    d = Strategist(a["account"], a["risk"]).decide(snap)
     dj = _decision_json(d)
-    return jsonify({"decision": dj, "review": ai.review_decision(dj)})
+    forecast = _clean(next_candle(snap, d))
+    review = ai.review_decision({**dj, "next_candle_forecast": forecast})
+    return jsonify({"decision": dj, "forecast": forecast, "review": review})
 
 
 @app.post("/api/screenshot")
@@ -211,6 +214,8 @@ def screenshot():
     result = {"chart": chart.model_dump(), "live": None, "live_error": None, "agreement": None}
 
     # Cross-check the picture against live data for the same coin and timeframe.
+    if body.get("skip_live"):  # the browser cross-checks with its own live Binance data
+        return jsonify(_clean(result))
     symbol = normalize_symbol(str(body.get("symbol") or chart.symbol_guess))
     live_tf = tf if tf in data.PROFILES else chart.timeframe_guess if chart.timeframe_guess in data.PROFILES else "1h"
     if symbol:

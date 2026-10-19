@@ -44,6 +44,11 @@ the agents, so predictions work even when Binance blocks the hosting server's re
 5. A walk-forward test on candles the method never saw decides whether there is a proven edge
 6. Live order flow and the Chief Strategist can downgrade a call they strongly disagree with
 
+**No one-sided bias:** the model ignores candles that close flat, and gives UP and DOWN examples equal weight,
+so neither flat candles nor a recent trend can make it say SHORT (or LONG) every time. The direction has to come from the signals.
+A regression test checks this on flat-candle, downtrend and uptrend data. The card also shows the market's own drift
+("x% of the last 200 candles closed up"), and the track record shows how many LONG vs SHORT calls were made.
+
 > One-candle moves, especially on 1m, are close to random, so honest probabilities are usually 50–60%.
 > On pure random data this system labels every call WEAK. It doesn't invent an edge.
 > On 1m and 5m a typical candle often moves less than trading fees cost, and the card warns you when that's the case.
@@ -60,7 +65,7 @@ CLI: `python -m crypto_agents next BTCUSDT --tf 1m --watch` prints a new predict
 | Multi-agent analysis on 1m / 5m / 15m / 1h / 4h / 1d. Re-runs every 5/10/30/60 s or on every candle close. | Live tab, `/api/analyze` |
 | Strategy selection by market regime: trend continuation, breakout, range / mean reversion, developing trend | every decision |
 | **Measured** win/loss odds: chance that price is up or down after the signal window, plus the win rate of past signals with a 95% confidence range | Live tab, `/api/odds` |
-| Market scanner: top 10–40 coins by 24h volume, best setups first | Scanner tab, `/api/scan` |
+| Market scanner: top 10–40 coins by 24h volume with each coin's next-candle call, STRONG/MODERATE first (live data fetched by your browser) | Scanner tab |
 | Screenshot analysis: drop, paste or upload any chart. The AI reads it, predicts up or down for your time window, and the app cross-checks the reading against live data. | Screenshot AI tab, `/api/screenshot` |
 | AI Senior Trader: reviews all the agents, searches the web for fresh news, and gives a verdict | "AI senior trader review" button, `/api/ai-review` |
 

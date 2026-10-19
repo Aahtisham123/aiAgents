@@ -146,14 +146,20 @@ def candle_shapes(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _fit_logistic(X: np.ndarray, y: np.ndarray, l2: float = 50.0, iters: int = 25) -> np.ndarray:
-    """Ridge-regularised logistic regression via Newton steps. X already includes a bias column."""
+    """Ridge-regularised logistic regression via Newton steps. X already includes a bias column.
+
+    Up and down candles get equal total weight, so the model can't just learn "down was more common
+    lately" and say SHORT every time — the direction has to come from the signals.
+    """
+    up = y.mean() if len(y) else 0.5
+    sw = np.where(y == 1, 0.5 / max(up, 1e-6), 0.5 / max(1 - up, 1e-6))
     w = np.zeros(X.shape[1])
     reg = np.full(X.shape[1], l2)
     reg[0] = 0  # don't shrink the intercept
     for _ in range(iters):
         p = 1 / (1 + np.exp(-np.clip(X @ w, -30, 30)))
-        grad = X.T @ (p - y) + reg * w
-        hess = (X * (p * (1 - p))[:, None]).T @ X + np.diag(reg) + 1e-9 * np.eye(len(w))
+        grad = X.T @ (sw * (p - y)) + reg * w
+        hess = (X * (sw * p * (1 - p))[:, None]).T @ X + np.diag(reg) + 1e-9 * np.eye(len(w))
         step = np.linalg.solve(hess, grad)
         w -= step
         if np.abs(step).max() < 1e-6:
@@ -188,7 +194,12 @@ class _Model:
         k = min(NEIGHBOURS, len(ref))
         idx = np.argpartition(d, k - 1, axis=1)[:, :k]
         ups = self.y[idx].sum(axis=1)
-        return (ups + 5 * 0.5) / (k + 5), ups
+        # Compare with how common up-candles were overall, so a downtrend alone doesn't mean SHORT.
+        prior = min(max(self.y.mean(), 0.05), 0.95)
+        rate_up = (ups + 2.5 * prior) / (k + 2.5)
+        odds = (rate_up / (1 - rate_up)) / (prior / (1 - prior))
+        p = odds / (1 + odds)
+        return 0.5 + (p - 0.5) * k / (k + 5), ups
 
     def predict(self, X: pd.DataFrame, S: pd.DataFrame) -> np.ndarray:
         wm, wp = self.weights
@@ -258,8 +269,10 @@ def next_candle(snap: MarketSnapshot, decision=None, now: float | None = None) -
 
     F_all = build_features(snap, closed)
     S_all = candle_shapes(closed)
-    y_all = (closed["close"].shift(-1) > closed["close"]).astype(float).values
-    valid = (F_all.notna().all(axis=1) & S_all.notna().all(axis=1)).to_numpy().copy()
+    nxt = closed["close"].shift(-1)
+    y_all = (nxt > closed["close"]).astype(float).values
+    moved = (nxt != closed["close"]).to_numpy()  # flat candles are neither up nor down: don't learn from them
+    valid = (F_all.notna().all(axis=1) & S_all.notna().all(axis=1)).to_numpy() & moved
     valid[-1] = False  # the last closed candle's "next" candle is the one we're predicting
     F, S, y = F_all[valid], S_all[valid], y_all[valid]
     F, S, y = F.tail(MAX_HISTORY), S.tail(MAX_HISTORY), y[-MAX_HISTORY:]  # bounded memory & time
@@ -354,6 +367,7 @@ def next_candle(snap: MarketSnapshot, decision=None, now: float | None = None) -
         "model_test": test, "has_edge": bool(edge),
         "typical_move_pct": move_pct, "fees_round_trip_pct": fee_round_trip,
         "trained_on": int(len(F)), "data_notes": list(snap.notes),
+        "recent_up_rate": float(y[-200:].mean()), "flat_candle_rate": float(1 - moved[:-1].mean()),
         "note": "The % is learned from this coin's recent candles, not guessed. One-candle moves are "
                 "close to random, so 55-60% is a good reading. No prediction is ever certain.",
     }

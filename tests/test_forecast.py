@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 import pandas as pd
 
 from crypto_agents import Strategist, data
@@ -148,3 +149,31 @@ def test_pattern_matching_learns_a_repeating_shape():
     df.iloc[-1, df.columns.get_loc("high")] = df["close"].iloc[-1] * 1.0005
     f = next_candle(data.snapshot_from_base("P", df, "5m"), now=df.index[-1].timestamp() + 600)
     assert f["pattern_match_up"] < 0.4 and f["direction"] == "SHORT"
+
+
+def _walk(seed, drift=0.0, tick=None, n=1200):
+    rng = np.random.default_rng(seed)
+    close = 0.1 * np.exp(np.cumsum(rng.normal(drift, 0.002, n)))
+    open_ = np.concatenate([[0.1], close[:-1]])
+    df = pd.DataFrame({"open": open_, "high": np.maximum(open_, close) * 1.001,
+                       "low": np.minimum(open_, close) * 0.999, "close": close},
+                      index=pd.date_range("2024-01-01", periods=n, freq="1min", tz="UTC"))
+    if tick:
+        df = (df / tick).round() * tick
+        df["open"] = df["close"].shift().fillna(df["open"])
+        df["high"] = df[["open", "high", "close"]].max(axis=1)
+        df["low"] = df[["open", "low", "close"]].min(axis=1)
+    vol = rng.lognormal(6, 0.5, n)
+    return df.assign(volume=vol, taker_buy_volume=vol * rng.uniform(0.4, 0.6, n))
+
+
+@pytest.mark.parametrize("kw", [{"tick": 0.0001}, {"drift": -0.0004}, {"drift": 0.0004}],
+                         ids=["many flat candles", "downtrend", "uptrend"])
+def test_no_one_sided_bias(kw):
+    """Regression test: flat candles or a trend alone must not make every prediction SHORT (or LONG)."""
+    df = _walk(1, **kw)
+    calls = [next_candle(data.snapshot_from_base("X", df.iloc[:cut], "1m"),
+                         now=df.index[cut - 1].timestamp() + 600)["direction"]
+             for cut in range(1000, 1200, 10)]
+    share_short = calls.count("SHORT") / len(calls)
+    assert 0.2 <= share_short <= 0.8, f"{share_short:.0%} SHORT"

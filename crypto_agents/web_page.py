@@ -305,7 +305,9 @@ function scoreboard(sym, tf){
   if (!graded.length) return '<span class="muted">Every prediction is checked automatically when its candle closes, while this page is open. Results will appear here.</span>';
   const line = (rows, label) => { if (!rows.length) return ""; const ok = rows.filter(r => r.correct).length;
     return `<div><b>${label}: ${ok} of ${rows.length} right (${Math.round(ok / rows.length * 100)}%)</b></div>`; };
+  const longs = graded.filter(r => r.call === "LONG").length;
   return line(graded, "All predictions") + line(graded.filter(r => r.strength !== "WEAK"), "STRONG + MODERATE only") +
+    `<div class="muted">Calls made: ${longs} LONG / ${graded.length - longs} SHORT</div>` +
     `<div class="dots">${graded.slice(-40).map(r => `<i title="${new Date(r.open).toLocaleTimeString()} ${r.call} (${r.strength}) → ${r.result}" style="background:${r.correct ? "var(--long)" : "var(--short)"};opacity:${r.strength === "WEAK" ? .45 : 1}"></i>`).join("")}</div>
     <span class="muted">${esc(sym)} ${esc(tf)}, saved in this browser. Faded dots = WEAK calls.</span>`;
 }
@@ -336,10 +338,11 @@ function renderForecast(f, source){
     <div class="grid"><div class="kv"><b>Entry</b><span>${num(f.plan.entry)}</span></div>
       <div class="kv"><b>Stop-loss</b><span>${num(f.plan.stop_loss)}</span></div>
       <div class="kv"><b>Target</b><span>${num(f.plan.take_profit)}</span></div>
-      <div class="kv"><b>Recent accuracy</b><span>${acc}</span></div></div>
+      <div class="kv"><b>Recent accuracy</b><span>${acc}</span></div>
+      <div class="kv"><b>Market drift (last 200 candles)</b><span>${pct(f.recent_up_rate)} closed up</span></div></div>
     <p class="muted">Exit: ${esc(f.plan.exit)}.</p>
     <h3>Live track record</h3><div id="nx-sb">${scoreboard(f.symbol, f.timeframe)}</div>
-    <p class="muted">${esc(f.note)} Data: ${esc(source)} · updated ${new Date().toLocaleTimeString()}.</p></div>`;
+    <p class="muted">${esc(f.note)} The chance assumes the candle moves at all${f.flat_candle_rate > 0.05 ? ` (${pct(f.flat_candle_rate)} of recent candles closed flat)` : ""}. Data: ${esc(source)} · updated ${new Date().toLocaleTimeString()}.</p></div>`;
 }
 
 // ---------------------------------------------------------------- analysis
@@ -462,7 +465,11 @@ $("aibtn").onclick = async () => {
   $("aibtn").disabled = true;
   if (!$("ai")) $("out").insertAdjacentHTML("afterbegin", '<div id="ai"></div>');
   $("ai").innerHTML = '<div class="card" id="ai-card">The AI senior trader is reviewing the agents and checking the latest news (about 20–60 s)…</div>';
-  try { const j = await getJSON("/api/ai-review?" + params({symbol:sym, tf}));
+  try {
+    let live = null;
+    if (!$("demo").checked) { try { live = await fetchLive(sym, tf); } catch(e) { if (e.fatal) throw e; } }
+    const j = await getJSON("/api/ai-review", {method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({symbol:sym, tf, account:$("account").value, risk:$("risk").value, demo:$("demo").checked ? "1" : "0", live})});
     $("ai").innerHTML = `<div class="card md" id="ai-card"><h2>AI Senior Trader review</h2>${md(j.review)}</div>`;
   } catch(e) { $("ai").innerHTML = `<div class="card err" id="ai-card">${esc(e.message)}</div>`; }
   finally { $("aibtn").disabled = false; }
@@ -483,25 +490,62 @@ function md(src){
 }
 
 // ---------------------------------------------------------------- scanner
+const STABLES = new Set(["USDC","FDUSD","TUSD","BUSD","DAI","USDP","USDE","EUR","AEUR","EURI","USD1","PAXG","XUSD","BFUSD","RLUSD","USDS","PYUSD"]);
+const normSym = raw => { let x = String(raw || "").toUpperCase().split(":").pop().split(".")[0].replace(/[^A-Z0-9]/g, "");
+  if (x.endsWith("PERP")) x = x.slice(0, -4); if (x.endsWith("USD")) x += "T";
+  if (x && !/(USDT|USDC|BTC|ETH|BNB|FDUSD)$/.test(x)) x += "USDT"; return x; };
+const STRENGTH_RANK = {STRONG: 0, MODERATE: 1, WEAK: 2};
+
+async function scanUniverse(){
+  const list = $("s-list").value.split(",").map(normSym).filter(Boolean);
+  if (list.length) return list.slice(0, 40).map(symbol => ({symbol}));
+  const rows = await binance("/api/v3/ticker/24hr");
+  return rows.filter(r => r.symbol.endsWith("USDT") && !STABLES.has(r.symbol.slice(0, -4)) && !/(UP|DOWN|BULL|BEAR)USDT$/.test(r.symbol) && +r.lastPrice > 0)
+    .sort((a, b) => +b.quoteVolume - +a.quoteVolume).slice(0, +$("s-top").value)
+    .map(r => ({symbol: r.symbol, change_24h: +r.priceChangePercent}));
+}
+
+function renderScan(tf, rows, done, total){
+  const sorted = [...rows].sort((a, b) => ("error" in a) - ("error" in b) ||
+    (STRENGTH_RANK[a.f?.strength] ?? 3) - (STRENGTH_RANK[b.f?.strength] ?? 3) || (b.f?.chance ?? 0) - (a.f?.chance ?? 0));
+  const body = sorted.map(r => r.error
+    ? `<tr><td>${esc(r.symbol)}</td><td class="err" colspan="8">${esc(r.error)}</td></tr>`
+    : `<tr><td><a href="#" data-s="${esc(r.symbol)}">${esc(r.symbol)}</a></td>
+       <td class="${r.f.direction}"><b>${r.f.direction === "LONG" ? "▲" : "▼"} ${esc(r.f.direction)}</b></td>
+       <td>${pct(r.f.chance)}</td><td><span class="pill ${r.f.strength === "STRONG" ? "UP" : r.f.strength === "MODERATE" ? "WAIT" : "DOWN"}">${esc(r.f.strength)}</span></td>
+       <td class="${r.d.action === "NO TRADE" ? "NO" : r.d.action}">${esc(r.d.action)}</td>
+       <td class="${(r.change_24h ?? 0) >= 0 ? "UP" : "DOWN"}">${r.change_24h == null ? "–" : r.change_24h.toFixed(1) + "%"}</td>
+       <td>${num(r.f.price)}</td><td>${num(r.f.plan.stop_loss)}</td><td>${num(r.f.plan.take_profit)}</td></tr>`).join("");
+  $("s-out").innerHTML = `<div class="card"><h2>Scan · next ${esc(tf)} candle ${done < total ? `(${done}/${total} analyzed…)` : ""}</h2>
+    <div class="scroll"><table><tr><th>Symbol</th><th>Next candle</th><th>Chance</th><th>Strength</th><th>Agents (bigger picture)</th><th>24h</th><th>Price</th><th>Stop</th><th>Target</th></tr>
+    ${body}</table></div><p class="muted">STRONG and MODERATE calls are listed first. Click a coin to watch it live with every agent's reasoning.</p></div>`;
+  $("s-out").querySelectorAll("a[data-s]").forEach(a => a.onclick = e => { e.preventDefault();
+    $("symbol").value = a.dataset.s; $("tf").value = tf;
+    document.querySelector('[data-tab="live"]').click(); $("f").requestSubmit(); });
+}
+
 $("s-go").onclick = async () => {
   $("s-go").disabled = true;
-  $("s-out").innerHTML = '<div class="card">Scanning the market. Each coin is analyzed by all agents (about 10–30 s)…</div>';
+  const tf = $("s-tf").value, demo = $("demo").checked;
+  $("s-out").innerHTML = '<div class="card">Finding the most traded coins on Binance…</div>';
   try {
-    const j = await getJSON("/api/scan?" + params({tf:$("s-tf").value, top:$("s-top").value, symbols:$("s-list").value}));
-    const rows = j.results.map(r => r.error
-      ? `<tr><td>${esc(r.symbol)}</td><td class="err" colspan="8">${esc(r.error)}</td></tr>`
-      : `<tr><td><a href="#" data-s="${esc(r.symbol)}">${esc(r.symbol)}</a></td>
-         <td class="${r.action === "NO TRADE" ? "NO" : r.action}">${esc(r.action)}</td><td>${esc(r.strategy)}</td>
-         <td>${r.setup_quality}</td><td>${r.score.toFixed(2)}</td>
-         <td class="${(r.change_24h ?? 0) >= 0 ? "UP" : "DOWN"}">${r.change_24h == null ? "–" : r.change_24h.toFixed(1) + "%"}</td>
-         <td>${num(r.entry ?? r.price)}</td><td>${num(r.stop_loss)}</td><td>${num(r.take_profit_1)}</td></tr>`).join("");
-    $("s-out").innerHTML = `<div class="card"><h2>Scan results · ${esc(j.timeframe)}</h2><div class="scroll"><table>
-      <tr><th>Symbol</th><th>Action</th><th>Strategy</th><th>Quality</th><th>Score</th><th>24h</th><th>Entry / price</th><th>Stop</th><th>TP1</th></tr>
-      ${rows}</table></div><p class="muted">Best setups are listed first. Click a symbol to open it live with each agent's reasoning.</p></div>`;
-    $("s-out").querySelectorAll("a[data-s]").forEach(a => a.onclick = e => { e.preventDefault();
-      $("symbol").value = a.dataset.s; $("tf").value = $("s-tf").value;
-      document.querySelector('[data-tab="live"]').click(); $("f").requestSubmit(); });
-  } catch(e) { $("s-out").innerHTML = `<div class="card err">${esc(e.message)}</div>`; }
+    const universe = demo ? ["BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT","XRPUSDT"].map(symbol => ({symbol})) : await scanUniverse();
+    const rows = []; let next = 0;
+    const worker = async () => {
+      while (next < universe.length) {
+        const row = universe[next++];
+        try {
+          const live = demo ? null : await fetchLive(row.symbol, tf);
+          const j = await getJSON("/api/next", {method:"POST", headers:{"Content-Type":"application/json"},
+            body: JSON.stringify({symbol:row.symbol, tf, account:$("account").value, risk:$("risk").value, demo: demo ? "1" : "0", live})});
+          if (j.forecast.error) throw new Error(j.forecast.error);
+          rows.push({...row, f:j.forecast, d:j.decision});
+        } catch(e) { rows.push({...row, error:e.message}); }
+        renderScan(tf, rows, rows.length, universe.length);
+      }
+    };
+    await Promise.all([worker(), worker(), worker()]);
+  } catch(e) { $("s-out").innerHTML = `<div class="card err">Couldn't load the coin list from Binance: ${esc(e.message)}</div>`; }
   finally { $("s-go").disabled = false; }
 };
 
@@ -537,7 +581,7 @@ $("x-go").onclick = async () => {
   try {
     const j = await getJSON("/api/screenshot", {method:"POST", headers:{"Content-Type":"application/json"},
       body: JSON.stringify({image:shotData, symbol:$("x-symbol").value, tf:$("x-tf").value, horizon:$("x-horizon").value,
-        note:$("x-note").value, account:$("account").value, risk:$("risk").value})});
+        note:$("x-note").value, account:$("account").value, risk:$("risk").value, skip_live:true})});
     const c = j.chart, list = a => a && a.length ? `<ul>${a.map(x => `<li>${esc(x)}</li>`).join("")}</ul>` : '<p class="muted">none</p>';
     let h = `<div class="card"><h2>AI chart reading ${c.symbol_guess ? "· " + esc(c.symbol_guess) : ""} ${c.timeframe_guess ? "· " + esc(c.timeframe_guess) : ""}</h2>
       <div class="action ${c.suggested_action}">${esc(c.suggested_action)}</div>
@@ -552,15 +596,28 @@ $("x-go").onclick = async () => {
       <h3>Reasoning</h3><p>${esc(c.reasoning)}</p>
       <h3>Invalidation</h3><p>${esc(c.invalidation)}</p><h3>Risks</h3>${list(c.risks)}
       ${c.image_quality_issues ? `<div class="warn">${esc(c.image_quality_issues)}</div>` : ""}</div>`;
-    if (j.live) { const d = j.live;
-      h += `<div class="card"><h2>Live cross-check · ${esc(d.symbol)} ${esc(d.timeframe)}: <span class="${j.agreement}">${esc(j.agreement)}</span></h2>
-        <p>Live agents say <b class="${d.action === "NO TRADE" ? "NO" : d.action}">${esc(d.action)}</b> (score ${d.score.toFixed(2)}, quality ${d.setup_quality}/100, strategy: ${esc(d.strategy)}).</p>
-        <p class="muted">${j.agreement === "AGREE" ? "The screenshot reading and live data agree, which makes for a stronger setup." :
-          j.agreement === "CONFLICT" ? "The screenshot and live data point in opposite directions, so stay out." :
-          "One side says wait, so it's better to wait for confirmation."}</p>
-        ${d.plan ? planHTML(d.plan) : ""}</div>`; }
-    else if (j.live_error) h += `<div class="card warn">${esc(j.live_error)}</div>`;
-    $("x-out").innerHTML = h;
+    $("x-out").innerHTML = h + '<div id="x-live" class="card muted">Checking the chart against live Binance data…</div>';
+    const sym = normSym($("x-symbol").value || c.symbol_guess);
+    const ltf = $("x-tf").value || (TFS.includes(c.timeframe_guess) ? c.timeframe_guess : "1h");
+    if (!sym) { $("x-live").textContent = "Couldn't read the coin from the screenshot. Type the symbol above to cross-check with live data."; }
+    else {
+      try {
+        const live = $("demo").checked ? null : await fetchLive(sym, ltf);
+        const k = await getJSON("/api/next", {method:"POST", headers:{"Content-Type":"application/json"},
+          body: JSON.stringify({symbol:sym, tf:ltf, account:$("account").value, risk:$("risk").value, demo:$("demo").checked ? "1" : "0", live})});
+        const f = k.forecast, d = k.decision;
+        const liveCall = f.error || f.strength === "WEAK" ? "WAIT" : f.direction;
+        const agreement = liveCall === c.suggested_action ? "AGREE" : (liveCall === "WAIT" || c.suggested_action === "WAIT") ? "PARTIAL" : "CONFLICT";
+        $("x-live").className = "card";
+        $("x-live").innerHTML = `<h2>Live cross-check · ${esc(sym)} ${esc(ltf)}: <span class="${agreement}">${esc(agreement)}</span></h2>
+          ${f.error ? `<p class="err">${esc(f.error)}</p>` : `<p>Next ${esc(ltf)} candle on live data: <b class="${f.direction}">${f.direction === "LONG" ? "▲" : "▼"} ${esc(f.direction)} ${pct(f.chance)}</b> <span class="pill ${f.strength === "STRONG" ? "UP" : f.strength === "MODERATE" ? "WAIT" : "DOWN"}">${esc(f.strength)}</span></p>`}
+          <p>Agents (bigger picture): <b class="${d.action === "NO TRADE" ? "NO" : d.action}">${esc(d.action)}</b> · ${esc(d.strategy)}</p>
+          <p class="muted">${agreement === "AGREE" && liveCall === "WAIT" ? "Both the screenshot and live data say wait. There's no clear trade right now." :
+            agreement === "AGREE" ? "The screenshot and live data agree, which makes for a stronger setup." :
+            agreement === "CONFLICT" ? "The screenshot and live data point in opposite directions, so stay out." :
+            "One side says wait, so it's better to wait for confirmation."}</p>`;
+      } catch(e) { $("x-live").className = "card warn"; $("x-live").textContent = `Live cross-check for ${sym} failed: ${e.message}`; }
+    }
   } catch(e) { $("x-out").innerHTML = `<div class="card err">${esc(e.message)}</div>`; }
   finally { $("x-go").disabled = false; }
 };
