@@ -71,8 +71,11 @@ def render_forecast(f: dict) -> str:
     t1 = datetime.fromtimestamp(f["target_candle_close"], timezone.utc).strftime("%H:%M")
     t = f["model_test"]
     out = ["=" * 72, f"  NEXT {f['timeframe']} CANDLE {t0}-{t1} UTC · {f['symbol']} @ {_fmt(f['price'])}",
-           f"  >>> {f['direction']} — {f['chance']:.0%} chance · {f['strength']} <<<",
-           f"  {f['advice']}"]
+           f"  >>> CHIEF: {f['final_call']} — leans {f['direction']} {f['chance']:.0%} · {f['strength']} <<<",
+           f"  {f['chief_summary']}", "  Agent council (vote for the next candle · track record):"]
+    for c in f["council"]:
+        rec = f"{c['track_record']:.0%} of {c['track_votes']}" if c["track_record"] is not None else "-"
+        out.append(f"    {c['agent']:32s} {c['vote']:9s} {rec:>12s}  {c['reading'][:60]}")
     out += [f"  • {w}" for w in f["why"]]
     if t.get("calls"):
         lo, hi = t["call_accuracy_95ci"]

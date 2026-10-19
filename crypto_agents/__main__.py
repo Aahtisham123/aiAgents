@@ -27,6 +27,13 @@ def main(argv=None) -> int:
     nx.add_argument("--demo", action="store_true")
     nx.add_argument("--watch", action="store_true", help="repeat at every candle close")
 
+    ev = sub.add_parser("evaluate", help="replay real candles and score the Chief's next-candle calls")
+    ev.add_argument("--symbol", default="BTCUSDT")
+    ev.add_argument("--tf", default="1m", choices=list(data.PROFILES))
+    ev.add_argument("--csv", help="OHLCV CSV of --tf candles (e.g. a TradingView export); default: last 1000 from Binance")
+    ev.add_argument("--n", type=int, default=300, help="number of candles to predict")
+    ev.add_argument("--fees", type=float, default=0.08, help="round-trip fees in %% (default 0.08)")
+
     s = sub.add_parser("scan", help="rank the most traded coins (or your list) and show the best setups")
     s.add_argument("symbols", nargs="*", help="default: top coins by 24h volume")
     s.add_argument("--top", type=int, default=20)
@@ -38,7 +45,7 @@ def main(argv=None) -> int:
     b.add_argument("--demo", action="store_true", help="use synthetic data")
     b.add_argument("--target-r", type=float, default=2.0)
 
-    for sp in (a, nx, s, b):
+    for sp in (a, nx, ev, s, b):
         sp.add_argument("--account", type=float, default=1000.0, help="account size in USDT")
         sp.add_argument("--risk", type=float, default=1.0, help="%% of account risked per trade")
     args = p.parse_args(argv)
@@ -68,6 +75,22 @@ def main(argv=None) -> int:
                 return 0
             step = data.TF_SECONDS[args.tf]
             time.sleep(step - time.time() % step + 1)
+
+    if args.cmd == "evaluate":
+        from .evaluate import evaluate
+        candles = data.load_csv(args.csv) if args.csv else data.fetch_klines(args.symbol.upper(), args.tf, 1000)
+        n = min(args.n, len(candles) - 400)
+        print(f"Replaying {n} {args.tf} candles of {args.symbol.upper()} (each prediction uses only earlier candles)…")
+        res = evaluate(candles, args.tf, n, args.fees, args.symbol.upper(), history=min(2500, len(candles)))
+        lo, hi = res["chief_accuracy_95ci"]
+        print(f"  Direction lean right on {res['lean_accuracy']:.1%} of {res['candles_tested']} candles")
+        if res["chief_calls"]:
+            print(f"  Chief LONG/SHORT calls: {res['chief_accuracy']:.1%} right on {res['chief_calls']} calls (95% range {lo:.0%}-{hi:.0%})")
+            print(f"  $100,000 following every call at 1x: ${res['equity_no_fees']:,.0f} before fees, "
+                  f"${res['equity_after_fees']:,.0f} after {res['fee_round_trip_pct']}% round-trip fees")
+        else:
+            print("  The Chief made no LONG/SHORT calls (all NO TRADE) — no proven edge on this data.")
+        return 0
 
     if args.cmd == "scan":
         results = []

@@ -12,6 +12,7 @@ import numpy as np
 from flask import Flask, Response, jsonify, request
 
 from crypto_agents import Strategist, ai, data
+from crypto_agents.analysis import market_report
 from crypto_agents.forecast import next_candle
 from crypto_agents.odds import historical_odds
 from crypto_agents.report import DISCLAIMER
@@ -138,7 +139,8 @@ def next_trade():
     """
     a, snap = _request_snapshot()
     d = Strategist(a["account"], a["risk"]).decide(snap)
-    return jsonify(_clean({"forecast": next_candle(snap, d), "decision": _decision_json(d)}))
+    f = next_candle(snap, d)
+    return jsonify(_clean({"forecast": f, "decision": _decision_json(d), "report": market_report(snap, d, f)}))
 
 
 @app.route("/api/odds", methods=["GET", "POST"])

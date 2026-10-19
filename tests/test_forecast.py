@@ -177,3 +177,56 @@ def test_no_one_sided_bias(kw):
              for cut in range(1000, 1200, 10)]
     share_short = calls.count("SHORT") / len(calls)
     assert 0.2 <= share_short <= 0.8, f"{share_short:.0%} SHORT"
+
+
+def test_agent_council_and_chief_verdict():
+    df = candles(3, signal=1.0)
+    snap = data.snapshot_from_base("X", df, "1m")
+    f = next_candle(snap, Strategist().decide(snap), now=df.index[-1].timestamp() + 600)
+    agents = [c["agent"] for c in f["council"]]
+    for a in ("Trend Analyst", "Momentum Analyst", "Price Action & Volume Analyst", "Order Flow Analyst",
+              "Pattern Matching Agent", "Sentiment & Derivatives Analyst"):
+        assert a in agents
+    of = next(c for c in f["council"] if c["agent"] == "Order Flow Analyst")
+    # the hidden signal lives in taker flow, so the order-flow agent must have the best record and agree
+    assert of["track_record"] > 0.65 and of["vote"] == ("UP" if f["direction"] == "LONG" else "DOWN")
+    assert f["final_call"] in ("LONG", "SHORT") and f["final_call"] == f["direction"]
+    assert f["votes_up"] + f["votes_down"] >= 1 and "agents vote" in f["chief_summary"]
+
+
+def test_chief_learns_that_momentum_reverses():
+    """Mean-reverting market (like real 1m data): a big up candle is usually followed by a down candle.
+    The Chief must learn to vote the OTHER way rather than follow the bullish reading."""
+    rng = np.random.default_rng(9)
+    n, rets = 1200, [0.0]
+    for _ in range(n - 1):
+        rets.append(-0.6 * rets[-1] + rng.normal(0, 0.002))
+    close = 100 * np.exp(np.cumsum(rets))
+    open_ = np.concatenate([[100], close[:-1]])
+    vol = rng.lognormal(6, 0.5, n)
+    df = pd.DataFrame({"open": open_, "high": np.maximum(open_, close) * 1.0005, "low": np.minimum(open_, close) * 0.9995,
+                       "close": close, "volume": vol, "taker_buy_volume": vol * 0.5},
+                      index=pd.date_range("2024-01-01", periods=n, freq="1min", tz="UTC"))
+    right = 0
+    cuts = range(1100, 1200, 4)
+    for cut in cuts:
+        sub = df.iloc[:cut]
+        f = next_candle(data.snapshot_from_base("R", sub, "1m"), now=sub.index[-1].timestamp() + 600)
+        right += (f["direction"] == "LONG") == (df.close.iloc[cut] > df.close.iloc[cut - 1])
+    assert right / len(cuts) > 0.65
+
+
+def test_next_endpoint_includes_market_report():
+    import app as webapp
+    j = webapp.app.test_client().get("/api/next?symbol=BTCUSDT&tf=5m&demo=1").get_json()
+    titles = [s["title"] for s in j["report"]["sections"]]
+    assert titles == ["Market overview", "Current position", "Candle analysis", "Strategies"]
+    assert len(j["report"]["candles"]) == 5 and "council" in j["forecast"]
+
+
+def test_evaluate_scores_real_style_replay():
+    from crypto_agents.evaluate import evaluate
+    df = candles(3, signal=1.0, n=1100)
+    res = evaluate(df, "1m", predictions=40, history=1000)
+    assert res["candles_tested"] > 30 and res["chief_calls"] > 10
+    assert res["chief_accuracy"] > 0.6 and res["equity_no_fees"] > 100000

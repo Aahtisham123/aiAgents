@@ -42,6 +42,18 @@ FEATURE_NAMES = {
     "pattern": "candlestick patterns", "breakout": "20-candle breakout",
 }
 
+# Which of the model's inputs belong to which agent: each agent's next-candle vote is the learned
+# contribution of its own signals, so the Chief knows what an agent's reading MEANS for the next candle on
+# this coin (e.g. on 1m an "overbought" momentum reading has usually meant a pullback, not more upside).
+AGENT_GROUPS = {
+    "Trend Analyst": ["ema_dist", "ema_slope", "adx_dir", "htf_trend", "htf_rsi", "ret10"],
+    "Momentum Analyst": ["rsi14", "rsi7", "macd", "stoch", "ret3"],
+    "Price Action & Volume Analyst": ["body", "upper_wick", "lower_wick", "bb", "vwap_dist", "vol", "pattern", "breakout"],
+    "Order Flow Analyst": ["taker1", "taker3"],
+}
+PATTERN_AGENT = "Pattern Matching Agent"
+VOTE_EPS = 0.05  # logit contribution below this = no real opinion
+
 BULLISH = {"bullish_engulfing": "Bullish engulfing", "hammer": "Hammer", "three_white_soldiers": "Three white soldiers",
            "breakout_up": "Breakout above 20-candle high"}
 BEARISH = {"bearish_engulfing": "Bearish engulfing", "shooting_star": "Shooting star", "three_black_crows": "Three black crows",
@@ -205,6 +217,16 @@ class _Model:
         wm, wp = self.weights
         return wm * self.predict_model(X) + wp * self.predict_patterns(S)[0]
 
+    def group_logits(self, X: pd.DataFrame) -> dict[str, np.ndarray]:
+        """Each agent's share of the model's verdict (in log-odds): >0 votes UP, <0 votes DOWN."""
+        contrib = ((X[self.cols].values - self.mu) / self.sd) * self.w[1:]
+        out = {}
+        for agent, cols in AGENT_GROUPS.items():
+            idx = [self.cols.index(c) for c in cols if c in self.cols]
+            if idx:
+                out[agent] = contrib[:, idx].sum(axis=1)
+        return out
+
     def drivers(self, x: pd.DataFrame, n: int = 4) -> list[tuple[str, float]]:
         contrib = ((x[self.cols].values[0] - self.mu) / self.sd) * self.w[1:]
         order = np.argsort(-np.abs(contrib))[:n]
@@ -229,7 +251,7 @@ def _fit(F: pd.DataFrame, S: pd.DataFrame, y: np.ndarray) -> _Model:
 def _walk_forward(F: pd.DataFrame, S: pd.DataFrame, y: np.ndarray) -> dict:
     """Train on the past, test on the following unseen block; repeat 3 times and pool the results."""
     n = len(F)
-    probs, actual = [], []
+    probs, actual, votes = [], [], {}
     for start in (0.55, 0.70, 0.85):
         a, b = int(n * start), min(int(n * (start + 0.15)), n)
         if a < 100 or b <= a:
@@ -237,6 +259,9 @@ def _walk_forward(F: pd.DataFrame, S: pd.DataFrame, y: np.ndarray) -> dict:
         m = _fit(F.iloc[:a], S.iloc[:a], y[:a])
         probs.append(m.predict(F.iloc[a:b], S.iloc[a:b]))
         actual.append(y[a:b])
+        for agent, g in m.group_logits(F.iloc[a:b]).items():
+            votes.setdefault(agent, []).append(g)
+        votes.setdefault(PATTERN_AGENT, []).append(m.predict_patterns(S.iloc[a:b])[0] - 0.5)
     if not probs:
         return {"tested": 0, "calls": 0, "call_accuracy": None, "call_accuracy_95ci": None}
     p, t = np.concatenate(probs), np.concatenate(actual)
@@ -245,7 +270,15 @@ def _walk_forward(F: pd.DataFrame, S: pd.DataFrame, y: np.ndarray) -> dict:
     calls = int(called.sum())
     hits = int(correct[called].sum())
     lo, hi = wilson(hits, calls)
+    agents = {}
+    for agent, parts in votes.items():
+        g = np.concatenate(parts)
+        eps = VOTE_EPS if agent != PATTERN_AGENT else 0.02
+        has_view = np.abs(g) > eps
+        k, nn = int(((g > 0) == (t == 1))[has_view].sum()), int(has_view.sum())
+        agents[agent] = {"votes": nn, "accuracy": k / nn if nn else None, "accuracy_95ci": list(wilson(k, nn)) if nn else None}
     return {
+        "agents": agents,
         "tested": len(t),
         "accuracy_all": float(correct.mean()),
         "calls": calls,
@@ -317,6 +350,35 @@ def next_candle(snap: MarketSnapshot, decision=None, now: float | None = None) -
                + (f" — pushing up: {', '.join(ups_d)}" if ups_d else "")
                + (f"; pushing down: {', '.join(downs_d)}" if downs_d else ""))
 
+    # ---- agent council: every agent votes on the next candle, the Chief weighs them by track record
+    reports = {r.agent: r for r in decision.reports} if decision is not None else {}
+    council = []
+    logits = model.group_logits(x_now)
+    for agent in list(AGENT_GROUPS) + [PATTERN_AGENT, "Sentiment & Derivatives Analyst"]:
+        rec = test.get("agents", {}).get(agent, {})
+        if agent == PATTERN_AGENT:
+            g, reading = p_pattern - 0.5, f"{int(ups[0])} of {k} most similar past setups went up"
+            vote = "UP" if g > 0.02 else "DOWN" if g < -0.02 else "NEUTRAL"
+            strength_v = min(abs(g) * 10, 1)
+        elif agent in logits:
+            g = float(logits[agent][0])
+            vote = "UP" if g > VOTE_EPS else "DOWN" if g < -VOTE_EPS else "NEUTRAL"
+            strength_v = min(abs(g) / 0.5, 1)
+            r = reports.get(agent)
+            reading = r.summary if r else ""
+        else:  # sentiment has no candle-by-candle history to learn from: shown, not counted
+            r = reports.get(agent)
+            reading = r.summary if r else "no data"
+            vote, strength_v, g = "INFO ONLY", 0.0, 0.0
+        council.append({"agent": agent, "reading": reading, "vote": vote, "strength": strength_v,
+                        "track_record": rec.get("accuracy"), "track_votes": rec.get("votes", 0),
+                        "track_95ci": rec.get("accuracy_95ci")})
+    if "taker1" not in model.cols and reports.get("Order Flow Analyst"):
+        council[3]["reading"] = reports["Order Flow Analyst"].summary
+    voting = [c for c in council if c["vote"] in ("UP", "DOWN")]
+    n_up = sum(c["vote"] == "UP" for c in voting)
+    n_down = len(voting) - n_up
+
     # ---- strength
     warnings = []
     if decision is not None:
@@ -327,7 +389,12 @@ def next_candle(snap: MarketSnapshot, decision=None, now: float | None = None) -
             elif of.score * sign > 0.15:
                 why.append(f"Live order flow agrees: {of.summary.lower()}")
         if decision.action in ("LONG", "SHORT") and decision.action != direction and decision.setup_quality >= 50:
-            warnings.append(f"The bigger picture (Chief Strategist) favours {decision.action}")
+            if tf in ("1m", "5m"):
+                # On real 1m data the multi-candle setup was wrong more often than right for the very next candle,
+                # so on these timeframes it is information, not a veto.
+                why.append(f"Bigger picture (several candles ahead) favours {decision.action}")
+            else:
+                warnings.append(f"The bigger picture (Chief Strategist) favours {decision.action}")
     if agree:
         why.append(f"Both methods point {'UP' if p_up >= 0.5 else 'DOWN'}")
     if chance >= STRONG_THRESHOLD and edge and agree and not warnings:
@@ -349,6 +416,14 @@ def next_candle(snap: MarketSnapshot, decision=None, now: float | None = None) -
         warnings.append(f"A typical {tf} candle moves only {move_pct:.3f}% and fees cost about "
                         f"{fee_round_trip:.2f}% per trade — consider a higher timeframe")
 
+    final_call = direction if strength != "WEAK" else "NO TRADE"
+    agree_word = "UP" if direction == "LONG" else "DOWN"
+    backing = n_up if direction == "LONG" else n_down
+    chief = (f"{backing} of {len(voting)} agents vote {agree_word}. Weighing each agent by its recent track record, "
+             f"the chance the next candle closes {agree_word.lower()} is {chance:.0%} → "
+             + (f"{final_call} ({strength})." if final_call != "NO TRADE" else
+                f"NO TRADE (leans {direction}, but the edge is too weak to trade)."))
+
     price = float(df["close"].iloc[-1])
     a = float(atr(closed).iloc[-1])
     plan = {"entry": price, "stop_loss": price - sign * a, "take_profit": price + sign * a,
@@ -357,7 +432,8 @@ def next_candle(snap: MarketSnapshot, decision=None, now: float | None = None) -
     return {
         "symbol": snap.symbol, "timeframe": tf,
         "direction": direction, "chance": chance, "strength": strength, "advice": advice,
-        "action": direction if strength != "WEAK" else "NO TRADE",
+        "action": final_call, "final_call": final_call, "chief_summary": chief,
+        "council": council, "votes_up": n_up, "votes_down": n_down,
         "probability_up": p_up, "probability_down": 1 - p_up,
         "pattern_match_up": p_pattern, "model_up": p_model, "methods_agree": bool(agree),
         "method_weights": {"indicators": wm, "pattern_match": wp},

@@ -60,6 +60,7 @@ th:nth-child(-n+3),td:nth-child(-n+3){text-align:left}
 .big{font-size:44px;font-weight:800;letter-spacing:.5px;line-height:1.1}
 .prob{display:flex;justify-content:space-between;font-weight:700;font-size:18px;margin-top:8px}
 .chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}.chip{background:var(--chip);border-radius:999px;padding:2px 10px;font-size:13px}
+.council{display:grid;gap:6px;margin-top:6px}.crow{background:var(--bg);border-radius:8px;padding:8px 10px}
 .dots{display:flex;gap:4px;flex-wrap:wrap;margin-top:6px}.dots i{width:12px;height:12px;border-radius:50%;display:inline-block}
 </style>
 </head>
@@ -91,6 +92,34 @@ th:nth-child(-n+3),td:nth-child(-n+3){text-align:left}
 </form></div>
 
 <div id="next"></div>
+
+<div id="report"></div>
+
+<div class="card" id="paper">
+  <div class="agent-head"><h2>Demo trading · $100,000 paper account</h2>
+    <button type="button" class="secondary" id="pt-reset" style="padding:4px 10px">Reset account</button></div>
+  <div class="grid" id="pt-stats"></div>
+  <h3>New order</h3>
+  <div class="row">
+    <label>Side<select id="pt-side"><option value="LONG">LONG (buy)</option><option value="SHORT">SHORT (sell)</option></select></label>
+    <label>Order type<select id="pt-type"><option value="market">Market</option><option value="limit">Limit</option></select></label>
+    <label id="pt-limit-l" class="hidden">Limit price<input id="pt-limit" type="number" step="any"></label>
+    <label>Margin (USDT)<input id="pt-margin" type="number" value="1000" min="1" step="any"></label>
+    <label>Leverage<select id="pt-lev"><option>1</option><option>2</option><option>3</option><option selected>5</option><option>10</option><option>20</option></select></label>
+    <label>Stop-loss<input id="pt-sl" type="number" step="any" placeholder="optional"></label>
+    <label>Take-profit<input id="pt-tp" type="number" step="any" placeholder="optional"></label>
+    <label class="check"><input id="pt-candle" type="checkbox">Close at candle close</label>
+  </div>
+  <div class="row" style="margin-top:10px">
+    <button type="button" id="pt-open">Open trade</button>
+    <button type="button" class="secondary" id="pt-follow">Fill from Chief's call</button>
+    <label class="check"><input id="pt-auto" type="checkbox">Auto-trade the Chief's LONG/SHORT calls</label>
+  </div>
+  <p class="muted" id="pt-msg">Fees 0.04% per side. Uses live Binance prices. Saved in this browser only, no real money.</p>
+  <h3>Open positions</h3><div id="pt-pos" class="scroll"></div>
+  <h3>Pending limit orders</h3><div id="pt-orders" class="scroll"></div>
+  <h3>Closed trades</h3><div id="pt-hist" class="scroll"></div>
+</div>
 <div id="tv"></div>
 
 <div class="card">
@@ -201,11 +230,11 @@ function connect(sym, tf){
   ws.onopen = () => { retry = 0; $("wsdot").classList.add("on"); };
   ws.onmessage = e => {
     const {stream, data} = JSON.parse(e.data);
-    if (stream.includes("@aggTrade")) trades.push({t:data.T, v:+data.p * +data.q, sell:data.m, p:+data.p});
+    if (stream.includes("@aggTrade")) { trades.push({t:data.T, v:+data.p * +data.q, sell:data.m, p:+data.p}); ptPrice(sym, +data.p); }
     else if (stream.includes("@depth")) book = data;
     else if (stream.includes("@kline")) {
       const closedNow = data.k.x && kline && !kline.x; kline = data.k;
-      if (closedNow) { gradeForecast(sym, tf, data.k); if ($("auto").value === "close") setTimeout(() => runAnalysis(true), 800); }
+      if (closedNow) { gradeForecast(sym, tf, data.k); ptCandleClosed(sym, data.k); if ($("auto").value === "close") setTimeout(() => runAnalysis(true), 800); }
     }
   };
   ws.onclose = () => { $("wsdot").classList.remove("on");
@@ -285,7 +314,7 @@ const saveSB = (sym, tf, rows) => { try { localStorage.setItem(sbKey(sym, tf), J
 function recordForecast(f){
   if ($("demo").checked) return;
   const rows = loadSB(f.symbol, f.timeframe), open = Math.round(f.target_candle_open * 1000);
-  const row = {open, call:f.direction, chance:f.chance, strength:f.strength};
+  const row = {open, call:f.direction, chance:f.chance, strength:f.strength, final:f.final_call};
   const i = rows.findIndex(r => r.open === open);
   if (i >= 0) { if (rows[i].result == null) rows[i] = row; } else rows.push(row);  // keep the latest call before the candle closes
   saveSB(f.symbol, f.timeframe, rows);
@@ -306,7 +335,7 @@ function scoreboard(sym, tf){
   const line = (rows, label) => { if (!rows.length) return ""; const ok = rows.filter(r => r.correct).length;
     return `<div><b>${label}: ${ok} of ${rows.length} right (${Math.round(ok / rows.length * 100)}%)</b></div>`; };
   const longs = graded.filter(r => r.call === "LONG").length;
-  return line(graded, "All predictions") + line(graded.filter(r => r.strength !== "WEAK"), "STRONG + MODERATE only") +
+  return line(graded.filter(r => r.final && r.final !== "NO TRADE"), "Chief's LONG/SHORT calls") + line(graded, "All leans (incl. NO TRADE)") +
     `<div class="muted">Calls made: ${longs} LONG / ${graded.length - longs} SHORT</div>` +
     `<div class="dots">${graded.slice(-40).map(r => `<i title="${new Date(r.open).toLocaleTimeString()} ${r.call} (${r.strength}) → ${r.result}" style="background:${r.correct ? "var(--long)" : "var(--short)"};opacity:${r.strength === "WEAK" ? .45 : 1}"></i>`).join("")}</div>
     <span class="muted">${esc(sym)} ${esc(tf)}, saved in this browser. Faded dots = WEAK calls.</span>`;
@@ -322,27 +351,49 @@ function renderForecast(f, source){
   lastForecast = f;
   recordForecast(f);
   const t = f.model_test, hhmm = s => new Date(s * 1000).toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"});
-  const arrow = f.direction === "LONG" ? "▲" : "▼";
+  const call = f.final_call, cls = call === "NO TRADE" ? "NO" : call;
   const sCls = f.strength === "STRONG" ? "UP" : f.strength === "MODERATE" ? "WAIT" : "DOWN";
-  const acc = t.calls ? `${pct(t.call_accuracy)} right on ${t.calls} recent test calls` : "not enough test calls yet";
-  $("next").innerHTML = `<div class="card next ${f.direction}b" id="next-card">
-    <div class="agent-head"><h2>Next ${esc(f.timeframe)} candle · ${esc(f.symbol)} · ${hhmm(f.target_candle_open)}–${hhmm(f.target_candle_close)}</h2>
-      <span class="pill NEUTRAL" id="nx-left"></span></div>
-    <div class="big ${f.direction}">${arrow} ${esc(f.direction)} <span style="font-size:.55em">${pct(f.chance)} chance</span></div>
+  const acc = t.calls ? `${pct(t.call_accuracy)} right on ${t.calls} recent unseen candles` : "not enough test calls yet";
+  const voteCell = v => v === "UP" ? '<b class="UP">▲ UP</b>' : v === "DOWN" ? '<b class="DOWN">▼ DOWN</b>' : `<span class="muted">${esc(v)}</span>`;
+  const rec = c => c.track_record == null ? '<span class="muted">–</span>' :
+    `<span class="${c.track_record >= 0.53 ? "UP" : c.track_record < 0.5 ? "DOWN" : ""}">${pct(c.track_record)}</span> <span class="muted">of ${c.track_votes}</span>`;
+  $("next").innerHTML = `<div class="card next ${call === "NO TRADE" ? "" : call + "b"}" id="next-card">
+    <div class="agent-head"><h2>Chief's call · next ${esc(f.timeframe)} candle · ${esc(f.symbol)} · ${hhmm(f.target_candle_open)}–${hhmm(f.target_candle_close)}</h2>
+      <span class="pill NEUTRAL" id="nx-left">live</span></div>
+    <div class="big ${cls}">${call === "LONG" ? "▲ " : call === "SHORT" ? "▼ " : ""}${esc(call)}
+      <span style="font-size:.5em">${call === "NO TRADE" ? `leans ${esc(f.direction)} ${pct(f.chance)}` : `${pct(f.chance)} chance`}</span></div>
     <div style="margin:6px 0 2px"><span class="pill ${sCls}">${esc(f.strength)}</span> ${esc(f.advice)}</div>
     <div class="prob"><span class="UP">UP ${pct(f.probability_up)}</span><span class="DOWN">DOWN ${pct(f.probability_down)}</span></div>
     <div class="meter"><span style="width:${(f.probability_up * 100).toFixed(1)}%"></span></div>
+    <p><b>Chief:</b> ${esc(f.chief_summary)}</p>
+    <h3>Agent council: what each agent sees and its vote for the next candle</h3>
+    <div class="council">${f.council.map(c => `<div class="crow">
+      <div class="agent-head"><b>${esc(c.agent)}</b><span>${voteCell(c.vote)} · ${rec(c)}</span></div>
+      <div class="muted">${esc(c.reading)}</div></div>`).join("")}</div>
+    <p class="muted">Each agent's vote is what its reading has actually meant for the next candle on this coin and timeframe, learned from recent history. On 1m, for example, an overbought reading usually meant a pullback. Track record = how often that agent's vote was right on recent candles it never saw.</p>
     <h3>Why</h3><ul>${f.why.map(w => `<li>${esc(w)}</li>`).join("")}</ul>
     ${f.patterns.length ? `<div class="chips">${f.patterns.map(p => `<span class="chip"><span class="${p.bias}">${p.bias === "UP" ? "▲" : p.bias === "DOWN" ? "▼" : "•"}</span> ${esc(p.name)}</span>`).join("")}</div>` : ""}
     ${f.warnings.length ? `<div class="warn"><ul>${f.warnings.map(w => `<li>${esc(w)}</li>`).join("")}</ul></div>` : ""}
     <div class="grid"><div class="kv"><b>Entry</b><span>${num(f.plan.entry)}</span></div>
       <div class="kv"><b>Stop-loss</b><span>${num(f.plan.stop_loss)}</span></div>
       <div class="kv"><b>Target</b><span>${num(f.plan.take_profit)}</span></div>
-      <div class="kv"><b>Recent accuracy</b><span>${acc}</span></div>
+      <div class="kv"><b>Chief's recent accuracy</b><span>${acc}</span></div>
       <div class="kv"><b>Market drift (last 200 candles)</b><span>${pct(f.recent_up_rate)} closed up</span></div></div>
     <p class="muted">Exit: ${esc(f.plan.exit)}.</p>
     <h3>Live track record</h3><div id="nx-sb">${scoreboard(f.symbol, f.timeframe)}</div>
     <p class="muted">${esc(f.note)} The chance assumes the candle moves at all${f.flat_candle_rate > 0.05 ? ` (${pct(f.flat_candle_rate)} of recent candles closed flat)` : ""}. Data: ${esc(source)} · updated ${new Date().toLocaleTimeString()}.</p></div>`;
+}
+
+function renderReport(r){
+  if (!r) { $("report").innerHTML = ""; return; }
+  const t = s => new Date(s * 1000).toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"});
+  $("report").innerHTML = `<div class="card"><h2>Market analysis</h2>
+    ${r.sections.map(sec => `<h3>${esc(sec.title)}</h3><ul>${sec.items.map(i => `<li>${esc(i)}</li>`).join("")}</ul>
+      ${sec.title === "Candle analysis" ? `<div class="scroll"><table><tr><th>Candle</th><th>Color</th><th>Change</th><th>Size (ATR)</th><th>Notes</th></tr>
+        ${r.candles.map(c => `<tr><td>${t(c.time)}</td><td class="${c.color === "green" ? "UP" : c.color === "red" ? "DOWN" : ""}">${esc(c.color)}</td>
+          <td>${c.change_pct >= 0 ? "+" : ""}${c.change_pct.toFixed(3)}%</td><td>${c.range_atr.toFixed(2)}</td>
+          <td style="white-space:normal">${esc(c.note)}</td></tr>`).join("")}</table></div>` : ""}`).join("")}
+  </div>`;
 }
 
 // ---------------------------------------------------------------- analysis
@@ -441,6 +492,9 @@ async function runAnalysis(silent){
     const d = j.decision;
     if (lastDecision && (lastDecision.symbol !== d.symbol || lastDecision.timeframe !== d.timeframe)) { lastOddsKey = ""; $("out").innerHTML = ""; }
     renderForecast(j.forecast, source);
+    renderReport(j.report);
+    if (!marks[j.forecast.symbol] && j.forecast.price) marks[j.forecast.symbol] = j.forecast.price;
+    ptAuto(j.forecast);
     renderDecision(d);
     loadOdds(d.symbol, tf, live);
   } catch(e) { renderForecastError(e.message); }
@@ -621,6 +675,162 @@ $("x-go").onclick = async () => {
   } catch(e) { $("x-out").innerHTML = `<div class="card err">${esc(e.message)}</div>`; }
   finally { $("x-go").disabled = false; }
 };
+
+// ---------------------------------------------------------------- demo (paper) trading
+const PT_KEY = "cta-paper-v1", PT_START = 100000, FEE = 0.0004;
+const ptFresh = () => ({balance: PT_START, positions: [], orders: [], history: [], nextId: 1});
+let PT = (() => { try { return JSON.parse(localStorage.getItem(PT_KEY)) || ptFresh(); } catch(e) { return ptFresh(); } })();
+const marks = {};
+const ptSave = () => { try { localStorage.setItem(PT_KEY, JSON.stringify(PT)); } catch(e) {} };
+const ptMsg = (t, bad) => { $("pt-msg").textContent = t; $("pt-msg").className = bad ? "err" : "muted"; };
+const money = x => (x < 0 ? "-$" : "$") + Math.abs(x).toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2});
+const sgn = s => s === "LONG" ? 1 : -1;
+const upnl = p => marks[p.symbol] ? (marks[p.symbol] - p.entry) * p.qty * sgn(p.side) : 0;
+
+function ptOpen({symbol, side, margin, lev, sl, tp, price, closeAt, source}){
+  if (!(price > 0)) return ptMsg("No live price yet for " + symbol + ". Wait a second and try again.", true);
+  const notional = margin * lev, fee = notional * FEE;
+  if (!(margin > 0)) return ptMsg("Enter a margin amount.", true);
+  if (margin + fee > PT.balance) return ptMsg(`Not enough balance: you have ${money(PT.balance)}.`, true);
+  if (sl && (side === "LONG" ? sl >= price : sl <= price)) return ptMsg(`Stop-loss must be ${side === "LONG" ? "below" : "above"} the entry price.`, true);
+  if (tp && (side === "LONG" ? tp <= price : tp >= price)) return ptMsg(`Take-profit must be ${side === "LONG" ? "above" : "below"} the entry price.`, true);
+  PT.balance -= margin + fee;
+  PT.positions.push({id: PT.nextId++, symbol, side, qty: notional / price, entry: price, lev, margin, sl: sl || null, tp: tp || null,
+    opened: Date.now(), closeAt: closeAt || null, feesPaid: fee, source: source || "manual"});
+  ptSave(); ptMsg(`Opened ${side} ${symbol} at ${num(price)} with ${money(margin)} × ${lev}x.`); ptRender();
+}
+
+function ptClose(p, price, reason){
+  const pnlGross = (price - p.entry) * p.qty * sgn(p.side);
+  const fee = price * p.qty * FEE;
+  const pnl = Math.max(pnlGross - fee, -p.margin);          // you can't lose more than the margin
+  PT.balance += p.margin + pnl;
+  PT.positions = PT.positions.filter(x => x.id !== p.id);
+  const net = pnl - p.feesPaid;
+  PT.history.unshift({...p, exit: price, closed: Date.now(), pnl: net, pct: net / p.margin * 100, reason,
+                      result: net > 0 ? "WIN" : "LOSS"});
+  PT.history = PT.history.slice(0, 200);
+  ptSave(); ptMsg(`${net > 0 ? "WIN" : "LOSS"}: ${p.side} ${p.symbol} closed at ${num(price)} (${reason}) → ${money(net)}.`, net <= 0);
+}
+
+function ptPrice(symbol, price){
+  marks[symbol] = price;
+  for (const o of PT.orders.filter(o => o.symbol === symbol)) {
+    if ((o.side === "LONG" && price <= o.limit) || (o.side === "SHORT" && price >= o.limit)) {
+      PT.orders = PT.orders.filter(x => x.id !== o.id); PT.balance += o.margin;  // release the reserved margin
+      ptOpen({...o, price: o.limit, source: "limit"});
+    }
+  }
+  for (const p of PT.positions.filter(p => p.symbol === symbol)) {
+    const loss = -(price - p.entry) * p.qty * sgn(p.side);
+    if (loss >= p.margin * 0.9) ptClose(p, price, "Liquidated");
+    else if (p.sl && (p.side === "LONG" ? price <= p.sl : price >= p.sl)) ptClose(p, p.sl, "Stop-loss hit");
+    else if (p.tp && (p.side === "LONG" ? price >= p.tp : price <= p.tp)) ptClose(p, p.tp, "Take-profit hit");
+  }
+}
+
+function ptCandleClosed(symbol, k){
+  for (const p of PT.positions.filter(p => p.symbol === symbol && p.closeAt && p.closeAt <= k.T + 1)) ptClose(p, +k.c, "Candle closed");
+}
+
+// prices for positions in other coins (the live stream only covers the coin on screen)
+setInterval(async () => {
+  const syms = [...new Set([...PT.positions, ...PT.orders].map(p => p.symbol))];
+  if (!syms.length || $("demo").checked) return;
+  try {
+    const rows = await binance(`/api/v3/ticker/price?symbols=${encodeURIComponent(JSON.stringify(syms))}`);
+    for (const r of rows) {
+      ptPrice(r.symbol, +r.price);
+      for (const p of PT.positions.filter(p => p.symbol === r.symbol && p.closeAt && Date.now() > p.closeAt + 3000)) ptClose(p, +r.price, "Candle closed");
+    }
+  } catch(e) {}
+}, 3000);
+
+function ptRender(){
+  const unreal = PT.positions.reduce((a, p) => a + upnl(p), 0);
+  const locked = PT.positions.reduce((a, p) => a + p.margin, 0) + PT.orders.reduce((a, o) => a + o.margin, 0);
+  const equity = PT.balance + locked + unreal;
+  const h = PT.history, wins = h.filter(t => t.result === "WIN").length, realized = h.reduce((a, t) => a + t.pnl, 0);
+  $("pt-stats").innerHTML = `
+    <div class="kv"><b>Equity</b><span class="${equity >= PT_START ? "UP" : "DOWN"}">${money(equity)}</span></div>
+    <div class="kv"><b>Total P&amp;L</b><span class="${equity >= PT_START ? "UP" : "DOWN"}">${money(equity - PT_START)} (${((equity / PT_START - 1) * 100).toFixed(2)}%)</span></div>
+    <div class="kv"><b>Available balance</b><span>${money(PT.balance)}</span></div>
+    <div class="kv"><b>Closed trades</b><span>${h.length ? `${wins} won / ${h.length - wins} lost (${Math.round(wins / h.length * 100)}%)` : "none yet"}</span></div>
+    <div class="kv"><b>Realized P&amp;L</b><span class="${realized >= 0 ? "UP" : "DOWN"}">${money(realized)}</span></div>
+    <div class="kv"><b>Open P&amp;L</b><span class="${unreal >= 0 ? "UP" : "DOWN"}">${money(unreal)}</span></div>`;
+  $("pt-pos").innerHTML = PT.positions.length ? `<table><tr><th>Coin</th><th>Side</th><th>Size</th><th>Entry</th><th>Price</th><th>P&amp;L</th><th>SL / TP</th><th></th></tr>
+    ${PT.positions.map(p => { const u = upnl(p); return `<tr><td>${esc(p.symbol)}</td><td class="${p.side}">${p.side} ${p.lev}x</td>
+      <td>${money(p.margin * p.lev)}</td><td>${num(p.entry)}</td><td>${num(marks[p.symbol])}</td>
+      <td class="${u >= 0 ? "UP" : "DOWN"}">${money(u)} (${(u / p.margin * 100).toFixed(1)}%)</td>
+      <td>${p.sl ? num(p.sl) : "–"} / ${p.tp ? num(p.tp) : "–"}${p.closeAt ? `<br><span class="muted">closes ${new Date(p.closeAt).toLocaleTimeString()}</span>` : ""}</td>
+      <td><button type="button" class="secondary" data-close="${p.id}" style="padding:2px 8px">Close</button></td></tr>`; }).join("")}</table>`
+    : '<p class="muted">No open positions.</p>';
+  $("pt-orders").innerHTML = PT.orders.length ? `<table><tr><th>Coin</th><th>Side</th><th>Limit</th><th>Size</th><th></th></tr>
+    ${PT.orders.map(o => `<tr><td>${esc(o.symbol)}</td><td class="${o.side}">${o.side} ${o.lev}x</td><td>${num(o.limit)}</td><td>${money(o.margin * o.lev)}</td>
+      <td><button type="button" class="secondary" data-cancel="${o.id}" style="padding:2px 8px">Cancel</button></td></tr>`).join("")}</table>`
+    : '<p class="muted">No pending orders.</p>';
+  $("pt-hist").innerHTML = h.length ? `<table><tr><th>Result</th><th>Coin</th><th>Side</th><th>Entry → exit</th><th>P&amp;L</th><th>Why closed</th><th>When</th></tr>
+    ${h.slice(0, 50).map(t => `<tr><td class="${t.result === "WIN" ? "UP" : "DOWN"}"><b>${t.result}</b></td><td>${esc(t.symbol)}</td>
+      <td class="${t.side}">${t.side} ${t.lev}x${t.source === "auto" ? " (auto)" : ""}</td><td>${num(t.entry)} → ${num(t.exit)}</td>
+      <td class="${t.pnl >= 0 ? "UP" : "DOWN"}">${money(t.pnl)} (${t.pct.toFixed(1)}%)</td><td>${esc(t.reason)}</td>
+      <td class="muted">${new Date(t.closed).toLocaleTimeString()}</td></tr>`).join("")}</table>`
+    : '<p class="muted">No closed trades yet. Results (WIN / LOSS) appear here.</p>';
+}
+setInterval(ptRender, 1000);
+
+$("paper").addEventListener("click", e => {
+  const c = e.target.dataset.close, x = e.target.dataset.cancel;
+  if (c) { const p = PT.positions.find(p => p.id === +c); if (p) { ptClose(p, marks[p.symbol] || p.entry, "Closed by you"); ptRender(); } }
+  if (x) { const o = PT.orders.find(o => o.id === +x); if (o) { PT.balance += o.margin; PT.orders = PT.orders.filter(q => q.id !== o.id); ptSave(); ptRender(); } }
+});
+$("pt-type").onchange = () => $("pt-limit-l").classList.toggle("hidden", $("pt-type").value !== "limit");
+$("pt-reset").onclick = () => { if (confirm("Reset the demo account to $100,000 and delete its history?")) { PT = ptFresh(); ptSave(); ptRender(); ptMsg("Account reset to $100,000."); } };
+
+function currentSymbol(){ return $("symbol").value.trim().toUpperCase().replace(/[^A-Z0-9]/g, ""); }
+$("pt-open").onclick = () => {
+  const symbol = currentSymbol(), side = $("pt-side").value, margin = +$("pt-margin").value, lev = +$("pt-lev").value;
+  const sl = +$("pt-sl").value || null, tp = +$("pt-tp").value || null;
+  const closeAt = $("pt-candle").checked && lastForecast && lastForecast.symbol === symbol ? lastForecast.target_candle_close * 1000 : null;
+  if ($("pt-type").value === "limit") {
+    const limit = +$("pt-limit").value;
+    if (!(limit > 0)) return ptMsg("Enter a limit price.", true);
+    if (margin <= 0 || margin > PT.balance) return ptMsg(`Not enough balance: you have ${money(PT.balance)}.`, true);
+    PT.balance -= margin;
+    PT.orders.push({id: PT.nextId++, symbol, side, margin, lev, sl, tp, limit, closeAt});
+    ptSave(); ptRender(); return ptMsg(`Limit ${side} ${symbol} at ${num(limit)} placed. It fills when the live price reaches it.`);
+  }
+  ptOpen({symbol, side, margin, lev, sl, tp, price: marks[symbol], closeAt});
+};
+$("pt-follow").onclick = () => {
+  if (!lastForecast) return ptMsg("No prediction yet. Press Analyze first.", true);
+  const f = lastForecast, call = f.final_call || f.direction;
+  if (call === "NO TRADE") ptMsg("The Chief says NO TRADE for this candle. Filled the levels anyway, but you might want to skip it.", true);
+  $("pt-side").value = call === "SHORT" || (call === "NO TRADE" && f.direction === "SHORT") ? "SHORT" : "LONG";
+  const lv = planLevels(f, $("pt-side").value, marks[f.symbol] || f.price);
+  $("pt-sl").value = lv.sl.toPrecision(6); $("pt-tp").value = lv.tp.toPrecision(6);
+  $("pt-candle").checked = true; $("pt-type").value = "market"; $("pt-limit-l").classList.add("hidden");
+};
+
+// The Chief's stop/target as distances from the entry, applied to the price you actually get
+function planLevels(f, side, price){
+  const stopDist = Math.abs(f.plan.entry - f.plan.stop_loss), tpDist = Math.abs(f.plan.take_profit - f.plan.entry);
+  return side === "LONG" ? {sl: price - stopDist, tp: price + tpDist} : {sl: price + stopDist, tp: price - tpDist};
+}
+
+// auto-trade: open one position per Chief LONG/SHORT call, closed at the candle's close
+function ptAuto(f){
+  if (!$("pt-auto").checked || $("demo").checked || !f || f.error) return;
+  const call = f.final_call || (f.strength !== "WEAK" ? f.direction : "NO TRADE");
+  if (call === "NO TRADE") return;
+  const step = f.target_candle_close - f.target_candle_open;
+  if (f.seconds_elapsed > 0.3 * step) return;                              // too late into the candle
+  if (PT.positions.some(p => p.symbol === f.symbol && p.source === "auto")) return;
+  if (PT.history.some(t => t.symbol === f.symbol && t.source === "auto" && t.closeAt === f.target_candle_close * 1000)) return;
+  const price = marks[f.symbol] || f.price, lv = planLevels(f, call, price);
+  ptOpen({symbol: f.symbol, side: call, margin: +$("pt-margin").value, lev: +$("pt-lev").value,
+          sl: lv.sl, tp: lv.tp, price, closeAt: f.target_candle_close * 1000, source: "auto"});
+}
+ptRender();
 
 startLive();
 if (!$("demo").checked) runAnalysis(false);

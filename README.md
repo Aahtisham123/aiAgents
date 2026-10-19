@@ -10,48 +10,49 @@ screenshots and give a senior-trader second opinion that includes a live news ch
 > number, this app **measures** how its own signals performed on the same coin and timeframe in recent
 > history, and shows the range of uncertainty. Test it with paper trading first. This is not financial advice.
 
-## Next-candle prediction (the main screen)
+## How the agents work together on the next candle (the main screen)
 
-Open the site, type a coin (e.g. **BTCUSDT**) and pick a timeframe (e.g. **1m**). The top card tells you:
+Pick a coin and a timeframe (e.g. **BTCUSDT · 1m**). At every candle close:
 
+1. **Each agent reads the market**: Trend, Momentum, Price Action & Volume, Order Flow and Sentiment,
+   plus a **Pattern Matching** agent that finds the 40 most similar past setups on this coin.
+2. **Each agent votes on the next candle (▲ UP / ▼ DOWN).** The vote is what that agent's reading has actually
+   meant for the next candle on this coin and timeframe, learned from its last ~1000 candles.
+   This matters: on real 1-minute data the agents' plain "bullish/bearish" readings were **wrong more often
+   than right** for the next candle (momentum 38%, the 5-agent consensus 43%), because 1m moves tend to snap back.
+   Read as learned votes, the same signals point the right way.
+3. **Each agent has a track record**: how often its vote was right on recent candles it never saw.
+4. **The Chief weighs the votes by those track records** and gives the final call: **LONG / SHORT / NO TRADE**, with a %
+   chance and a strength label (STRONG / MODERATE / WEAK). It says NO TRADE when the edge isn't proven.
+5. Below the call: a **market analysis** (market overview, current position, the last 5 candles, strategies).
+
+### Tested on real market data
+
+Walk-forward replays where every prediction uses only earlier candles:
+
+| Real data | Chief's LONG/SHORT calls | Notes |
+|---|---|---|
+| Binance 1-minute candles (small-cap coin, 2017) | **65% right** (59–71%) on 242 calls; $100,000 → ~$107,700 after 0.08% fees | Balanced: 42% LONG / 58% SHORT |
+| Bitstamp BTC/USD hourly (2017) | mostly **NO TRADE** (traded 4% of hours) | Nothing reliably predicts the next BTC hour; it says so instead of guessing |
+
+Test it yourself on any coin and timeframe:
+```bash
+python -m crypto_agents evaluate --symbol BTCUSDT --tf 1m            # last 1000 live candles from Binance
+python -m crypto_agents evaluate --csv BTCUSDT_5m.csv --tf 5m --n 500 # a TradingView export
 ```
-Next 1m candle · BTCUSDT · 21:19–21:20          closes in 0:47
-▲ LONG  57% chance                              [MODERATE] Possible trade: use a small size
-Why
- • Candle pattern on the last closed candle: Bullish engulfing
- • Pattern match: in the 40 most similar past setups, the next candle went up 25 times and down 15 → 61% up
- • Indicator model: 54% up — pushing up: higher-timeframe trend, taker buying
- • Live order flow agrees: buyers are aggressive right now
-Entry · Stop-loss · Target · Recent accuracy
-Live track record: 31 of 52 right (60%)
-```
+Today's big coins (BTC, ETH) are more efficient than the 2017 test coin, so expect less.
 
-- It **always** gives a direction (LONG or SHORT) and a % chance.
-- The **strength** label tells you whether to act:
-  **STRONG** (≥58%, has beaten chance on recent unseen candles, both methods agree), **MODERATE** (≥55% with a proven edge),
-  **WEAK** (close to a coin flip, so skip).
-- It refreshes by itself at **every candle close**, so on 1m you get a new prediction every minute.
-- Every prediction is graded automatically when its candle closes. The **live track record** shows how often it has been right in your browser.
+## Demo trading ($100,000 paper account)
 
-**Live data:** your browser fetches the candles, order book and trades directly from Binance and sends them to
-the agents, so predictions work even when Binance blocks the hosting server's region. If that fails, the server fetches the data itself.
-
-**How the % is computed** (all on this coin's own last ~1000 candles):
-1. Candlestick patterns: engulfing, hammer, shooting star, doji, three soldiers/crows, inside bar, 20-candle breakouts
-2. Pattern matching: the 40 past moments whose recent candles looked most like now, and what the next candle did
-3. An indicator model that learns from the agents' signals (trend, momentum, price action, volume, taker flow, higher-timeframe trend)
-4. The two are blended, each weighted by how accurate it was on held-out recent candles
-5. A walk-forward test on candles the method never saw decides whether there is a proven edge
-6. Live order flow and the Chief Strategist can downgrade a call they strongly disagree with
-
-**No one-sided bias:** the model ignores candles that close flat, and gives UP and DOWN examples equal weight,
-so neither flat candles nor a recent trend can make it say SHORT (or LONG) every time. The direction has to come from the signals.
-A regression test checks this on flat-candle, downtrend and uptrend data. The card also shows the market's own drift
-("x% of the last 200 candles closed up"), and the track record shows how many LONG vs SHORT calls were made.
-
-> One-candle moves, especially on 1m, are close to random, so honest probabilities are usually 50–60%.
-> On pure random data this system labels every call WEAK. It doesn't invent an edge.
-> On 1m and 5m a typical candle often moves less than trading fees cost, and the card warns you when that's the case.
+Right under the Chief's call:
+- **Market** and **limit** orders, **LONG or SHORT**, leverage **1x–20x**, stop-loss and take-profit
+- **Close at candle close** for next-candle trades
+- **Fill from Chief's call**: fills the side, stop and target. The levels are applied to the price you actually get.
+- **Auto-trade the Chief's LONG/SHORT calls**: one trade per call, closed at that candle's close
+- Live P&L from Binance prices, 0.04% fees per side, liquidation if a leveraged loss eats the margin
+- **Closed trades** list each trade as **WIN / LOSS** with its P&L and why it closed (take-profit, stop-loss, candle close,
+  liquidation, closed by you). Equity, total P&L and win rate are shown at the top.
+- Saved in your browser. "Reset account" starts again at $100,000. No real money is involved.
 
 CLI: `python -m crypto_agents next BTCUSDT --tf 1m --watch` prints a new prediction at every candle close.
 
@@ -154,7 +155,9 @@ crypto_agents/
   agents/              trend, momentum, structure, orderflow, sentiment, risk
   strategist.py        combines the agents, picks a strategy, sets signal expiry
   odds.py              measured win/loss odds (look-ahead-free replay)
-  forecast.py          next-candle prediction: candlestick patterns, pattern matching, indicator model, edge test
+  forecast.py          next-candle prediction: agent council, Chief verdict, patterns, pattern matching, edge test
+  analysis.py          market overview, current position, candle analysis, strategies
+  evaluate.py          walk-forward test of the Chief's calls on real candles
   ai.py                Claude chart-vision and senior-trader agents
   backtest.py          longer walk-forward backtest (CLI)
   report.py            console output
