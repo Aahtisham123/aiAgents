@@ -62,12 +62,22 @@ th:nth-child(-n+3),td:nth-child(-n+3){text-align:left}
 .chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}.chip{background:var(--chip);border-radius:999px;padding:2px 10px;font-size:13px}
 .council{display:grid;gap:6px;margin-top:6px}.crow{background:var(--bg);border-radius:8px;padding:8px 10px}
 .dots{display:flex;gap:4px;flex-wrap:wrap;margin-top:6px}.dots i{width:12px;height:12px;border-radius:50%;display:inline-block}
+.plan.go{border-color:var(--long);border-width:2px}.plan.short{border-color:var(--short);border-width:2px}.plan.wait{border-color:var(--accent);border-width:2px}
+.steps{list-style:none;padding:0;margin:6px 0 0;display:grid;gap:6px}
+.steps details{background:var(--bg);border-radius:8px;padding:8px 10px}
+.steps summary{cursor:pointer;list-style:none;display:flex;gap:8px;align-items:baseline}
+.steps summary::-webkit-details-marker{display:none}
+.steps ul{margin:6px 0 0;padding-left:20px;font-size:13px;color:var(--muted)}
+.st{flex:none;width:20px;height:20px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;color:#fff}
+.st.PASS{background:var(--long)}.st.FAIL{background:var(--short)}.st.WARN{background:#c98a00}.st.INFO{background:var(--none)}
+.how{margin:8px 0 0;padding-left:22px}.how li{margin:3px 0}
+.fan{width:100%;height:170px;display:block}
 </style>
 </head>
 <body>
 <main>
 <h1>Crypto Trading Agents</h1>
-<p class="sub">Five analyst agents, a risk manager and a chief strategist working on live Binance data, with optional Claude AI for screenshots and a senior-trader review.</p>
+<p class="sub">Five analyst agents, a risk manager and a chief strategist working on live Binance data, plus a pro trader's pre-trade checklist that tells you exactly where to enter, with optional Claude AI for screenshots and a senior-trader review.</p>
 
 <div class="tabs" role="tablist">
   <button class="on" data-tab="live">Live trading</button>
@@ -86,10 +96,15 @@ th:nth-child(-n+3),td:nth-child(-n+3){text-align:left}
     <option value="0">Manual</option><option value="close" selected>Every candle close</option>
     <option value="5">Every 5 s</option><option value="10">Every 10 s</option>
     <option value="30">Every 30 s</option><option value="60">Every 60 s</option></select></label>
+  <label>Plan side<select id="side"><option value="AUTO">Auto (agents decide)</option><option>LONG</option><option>SHORT</option></select></label>
+  <label>Target<select id="target"><option value="1.5">1.5R</option><option value="2" selected>2R</option><option value="3">3R</option></select></label>
   <label class="check"><input id="demo" type="checkbox">Demo data</label>
+  <label class="check"><input id="alert" type="checkbox">Alert me when it's time to enter</label>
   <button id="go" type="submit">Analyze</button>
   <button id="aibtn" type="button" class="secondary hidden">AI senior trader review</button>
 </form></div>
+
+<div id="plan"></div>
 
 <div id="next"></div>
 
@@ -185,7 +200,7 @@ for (const sel of ["tf","s-tf","x-tf"]) for (const t of TFS) {
   $(sel).add(sel === "x-tf" ? new Option(t,t) : new Option(t,t,t===def,t===def));
 }
 try { const saved = JSON.parse(localStorage.getItem("cta") || "{}");
-  for (const k of ["symbol","tf","account","risk"]) if (saved[k]) $(k).value = saved[k]; } catch(e) {}
+  for (const k of ["symbol","tf","account","risk","side","target"]) if (saved[k]) $(k).value = saved[k]; } catch(e) {}
 
 // ---------------------------------------------------------------- tabs
 document.querySelectorAll(".tabs button").forEach(b => b.onclick = () => {
@@ -300,9 +315,22 @@ async function fetchLive(sym, tf){
   const [depth, trades] = await Promise.all([
     binance(`/api/v3/depth?symbol=${sym}&limit=500`).catch(() => null),
     binance(`/api/v3/aggTrades?symbol=${sym}&limit=1000`).catch(() => null)]);
-  const klines = {};
-  PROFILES[tf].forEach((t, i) => klines[t] = kl[i].map(k => [k[0], +k[1], +k[2], +k[3], +k[4], +k[5], +k[9]]));
-  return {klines, depth, trades: trades && trades.map(t => ({p:t.p, q:t.q, m:t.m, T:t.T}))};
+  const klines = {}, rows = k => k.map(x => [x[0], +x[1], +x[2], +x[3], +x[4], +x[5], +x[9]]);
+  PROFILES[tf].forEach((t, i) => klines[t] = rows(kl[i]));
+  const [daily, btc_daily] = await Promise.all([dailyCandles(sym), sym === "BTCUSDT" ? null : dailyCandles("BTCUSDT")]);
+  return {klines, depth, trades: trades && trades.map(t => ({p:t.p, q:t.q, m:t.m, T:t.T})), daily, btc_daily};
+}
+
+// Daily candles of the coin and of BTC, for the market-regime check (they change slowly: cached 10 minutes)
+const dailyCache = {};
+async function dailyCandles(sym){
+  const hit = dailyCache[sym];
+  if (hit && Date.now() - hit.at < 600000) return hit.rows;
+  try {
+    const k = await binance(`/api/v3/klines?symbol=${sym}&interval=1d&limit=400`);
+    const rows = k.map(x => [x[0], +x[1], +x[2], +x[3], +x[4], +x[5], +x[9]]);
+    dailyCache[sym] = {at: Date.now(), rows}; return rows;
+  } catch(e) { return null; }
 }
 
 // ---------------------------------------------------------------- next-candle forecast + live track record
@@ -382,6 +410,90 @@ function renderForecast(f, source){
     <p class="muted">Exit: ${esc(f.plan.exit)}.</p>
     <h3>Live track record</h3><div id="nx-sb">${scoreboard(f.symbol, f.timeframe)}</div>
     <p class="muted">${esc(f.note)} The chance assumes the candle moves at all${f.flat_candle_rate > 0.05 ? ` (${pct(f.flat_candle_rate)} of recent candles closed flat)` : ""}. Data: ${esc(source)} · updated ${new Date().toLocaleTimeString()}.</p></div>`;
+}
+
+// ---------------------------------------------------------------- pro trade plan
+let lastPlan = null, lastPlanAction = "";
+const ICON = {PASS:"✓", FAIL:"✕", WARN:"!", INFO:"i"};
+
+function fanChart(p){
+  const mc = p.steps.find(s => s.key === "timemachine")?.data?.mc;
+  if (!mc || !mc.fan) return "";
+  const W = 600, H = 170, pad = 4, n = mc.fan.length;
+  const vals = mc.fan.flat().concat([p.entry, p.stop, p.targets[1]]);
+  const lo = Math.min(...vals), hi = Math.max(...vals), y = v => pad + (hi - v) / ((hi - lo) || 1) * (H - 2 * pad);
+  const x = i => (i + 1) / n * W;
+  const band = (a, b) => `M0,${y(p.entry)} ` + mc.fan.map((q, i) => `L${x(i)},${y(q[a])}`).join(" ") + " " +
+    mc.fan.map((q, i) => `L${x(n - 1 - i)},${y(mc.fan[n - 1 - i][b])}`).join(" ") + ` L0,${y(p.entry)} Z`;
+  const line = (v, color, label) => `<line x1="0" x2="${W}" y1="${y(v)}" y2="${y(v)}" stroke="${color}" stroke-dasharray="4 4"/>
+    <text x="${W - 4}" y="${y(v) < 16 ? y(v) + 13 : y(v) - 4}" text-anchor="end" font-size="11" fill="${color}">${label} ${num(v)}</text>`;
+  return `<svg class="fan" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="Range of replayed prices">
+    <path d="${band(0, 4)}" fill="var(--accent)" opacity=".12"/><path d="${band(1, 3)}" fill="var(--accent)" opacity=".22"/>
+    <path d="M0,${y(p.entry)} ${mc.fan.map((q, i) => `L${x(i)},${y(q[2])}`).join(" ")}" fill="none" stroke="var(--accent)" stroke-width="2"/>
+    ${line(p.targets[1], "var(--long)", "target")}${line(p.entry, "var(--muted)", "entry")}${line(p.stop, "var(--short)", "stop")}</svg>
+    <p class="muted">Where ${mc.replays.toLocaleString()} replays of the next ${mc.steps} candles ended up: the dark band holds half of them, the light band 90%, the line is the middle one.</p>`;
+}
+
+function renderPlan(p, source){
+  if (!p) { $("plan").innerHTML = ""; return; }
+  if (p.error) { lastPlan = null; $("plan").innerHTML = `<div class="card err">${esc(p.error)}</div>`; return; }
+  lastPlan = p;
+  const go = p.action.startsWith("ENTER"), no = p.action.startsWith("NO TRADE");
+  const cls = no ? "" : go ? (p.side === "LONG" ? "go" : "short") : "wait";
+  const color = no ? "NO" : p.side;
+  const t = p.sizing, base = p.symbol.replace(/USDT$/, "");
+  $("plan").innerHTML = `<div class="card plan ${cls}" id="plan-card">
+    <div class="agent-head"><h2>Pro trade plan · ${esc(p.symbol)} · ${esc(p.timeframe)}</h2><span class="pill NEUTRAL">${esc(p.score)}</span></div>
+    <div class="action ${color}">${esc(p.action)}</div>
+    <p style="margin:4px 0 0"><b>${esc(p.headline)}</b></p>
+    <div class="grid">
+      <div class="kv"><b>Entry (${esc(p.entry_kind)})</b><span>${num(p.entry)}</span></div>
+      <div class="kv"><b>Stop-loss</b><span class="DOWN">${num(p.stop)}</span></div>
+      <div class="kv"><b>Take profit 1R / ${p.target_r}R / ${p.target_r + 1}R</b><span class="UP">${p.targets.map(num).join(" · ")}</span></div>
+      <div class="kv"><b>Size</b><span>${Number(t.units).toPrecision(4)} ${esc(base)}</span> <span class="muted">≈ ${num(t.value)} USDT, ${t.leverage}x</span></div>
+      <div class="kv"><b>Max loss at the stop</b><span>${num(t.max_loss)} USDT</span></div>
+      <div class="kv"><b>Price now</b><span>${num(p.price)}</span></div></div>
+    <h3>How to enter</h3><ol class="how">${p.how_to_enter.map(h => `<li>${esc(h)}</li>`).join("")}</ol>
+    ${p.warnings.length ? `<div class="warn"><ul>${p.warnings.map(w => `<li>${esc(w)}</li>`).join("")}</ul></div>` : ""}
+    <div class="row" style="margin-top:12px"><button type="button" id="plan-load" ${no ? 'class="secondary"' : ""}>Load plan into demo trade</button>
+      <span class="muted" id="plan-msg"></span></div>
+    <h3>Time Machine</h3>${fanChart(p)}
+    <h3>Pre-trade checklist</h3>
+    <ul class="steps">${p.steps.map(s => `<li><details><summary><span class="st ${s.status}">${ICON[s.status]}</span>
+      <span><b>${esc(s.title)}</b> <span class="chip">${esc(s.skill)}</span><br>${esc(s.summary)}</span></summary>
+      ${s.details.length ? `<ul>${s.details.map(d => `<li>${esc(d)}</li>`).join("")}</ul>` : ""}</details></li>`).join("")}</ul>
+    <p class="muted">${esc(p.disclaimer)} Data: ${esc(source)} · updated ${new Date(p.generated_at * 1000).toLocaleTimeString()}. Tap a step to see the details.</p></div>`;
+  $("plan-load").onclick = loadPlan;
+  if ($("alert").checked && go && lastPlanAction !== p.action + p.symbol) notify(`${p.action}: ${p.symbol}`, p.headline);
+  lastPlanAction = p.action + p.symbol;
+}
+
+function notify(title, body){
+  try { const a = new AudioContext(), o = a.createOscillator(); o.connect(a.destination); o.frequency.value = 880; o.start(); o.stop(a.currentTime + 0.25); } catch(e) {}
+  try { if (Notification.permission === "granted") new Notification(title, {body}); } catch(e) {}
+}
+$("alert").onchange = () => { try { if ($("alert").checked && Notification.permission === "default") Notification.requestPermission(); } catch(e) {} };
+
+function loadPlan(){
+  const p = lastPlan; if (!p) return;
+  const msg = t => $("plan-msg").textContent = t;
+  $("pt-side").value = p.side; $("pt-sl").value = p.stop; $("pt-tp").value = p.targets[1];
+  const levs = [...$("pt-lev").options].map(o => +o.value), lev = levs.find(l => l >= p.sizing.leverage) || levs[levs.length - 1];
+  $("pt-lev").value = lev; $("pt-margin").value = (p.sizing.value / lev).toFixed(2); $("pt-candle").checked = false;
+  const limit = p.entry_kind === "retest limit";
+  $("pt-type").value = limit ? "limit" : "market"; $("pt-limit-l").classList.toggle("hidden", !limit);
+  if (limit) $("pt-limit").value = p.entry;
+  $("paper").scrollIntoView({behavior:"smooth", block:"start"});
+  msg(p.action.startsWith("NO TRADE") ? "Filled in, but the checklist says NO TRADE."
+    : p.action.startsWith("ENTER") ? "Filled in the demo order below. Check it, then press Open trade."
+    : limit ? "Filled in a limit order at the retest level. Check it, then press Open trade."
+    : "Filled in, but wait: only open it once a candle closes past the level (tick 'Alert me' to be told).");
+}
+
+// What the circuit breaker and the risk manager need from the demo account
+function ptJournal(){
+  return {start_equity: PT_START, open_symbols: PT.positions.map(p => p.symbol),
+          trades: PT.history.map(t => ({closed: t.closed, pnl: t.pnl, symbol: t.symbol}))};
 }
 
 function renderReport(r){
@@ -475,9 +587,11 @@ async function loadOdds(sym, tf, live){
 async function runAnalysis(silent){
   if (busy) return; busy = true;
   const sym = $("symbol").value.trim().toUpperCase().replace(/[^A-Z0-9]/g, ""), tf = $("tf").value, demo = $("demo").checked;
-  try { localStorage.setItem("cta", JSON.stringify({symbol:sym, tf, account:$("account").value, risk:$("risk").value})); } catch(e) {}
+  try { localStorage.setItem("cta", JSON.stringify({symbol:sym, tf, account:$("account").value, risk:$("risk").value,
+    side:$("side").value, target:$("target").value})); } catch(e) {}
   $("go").disabled = true;
   if (!lastForecast || lastForecast.symbol !== sym || lastForecast.timeframe !== tf) {
+    $("plan").innerHTML = '<div class="card">Running the pro trader checklist: market regime, setups, entry timer, exit plan, 10,000 replays, sizing and risk limits…</div>';
     $("next").innerHTML = '<div class="card next">Fetching live candles and asking all agents for the next candle…</div>';
     $("out").innerHTML = "";
   }
@@ -487,10 +601,12 @@ async function runAnalysis(silent){
       try { live = await fetchLive(sym, tf); source = "live Binance candles fetched by your browser"; }
       catch(e) { if (e.fatal) throw new Error(`${sym} is not a Binance spot pair. Try e.g. BTCUSDT, ETHUSDT or SOLUSDT.`); }
     }
-    const body = {symbol:sym, tf, account:$("account").value, risk:$("risk").value, demo: demo ? "1" : "0", live};
+    const body = {symbol:sym, tf, account:$("account").value, risk:$("risk").value, demo: demo ? "1" : "0", live,
+      side:$("side").value, target_r:$("target").value, max_leverage:$("pt-lev").value, journal: ptJournal()};
     const j = await getJSON("/api/next", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)});
     const d = j.decision;
     if (lastDecision && (lastDecision.symbol !== d.symbol || lastDecision.timeframe !== d.timeframe)) { lastOddsKey = ""; $("out").innerHTML = ""; }
+    renderPlan(j.plan, source);
     renderForecast(j.forecast, source);
     renderReport(j.report);
     if (!marks[j.forecast.symbol] && j.forecast.price) marks[j.forecast.symbol] = j.forecast.price;

@@ -10,6 +10,44 @@ screenshots and give a senior-trader second opinion that includes a live news ch
 > number, this app **measures** how its own signals performed on the same coin and timeframe in recent
 > history, and shows the range of uncertainty. Test it with paper trading first. This is not financial advice.
 
+## Pro trade plan: where to enter (top of the Live tab)
+
+Before every trade, the site runs the checklist a professional trader runs, and ends with one instruction:
+**ENTER LONG/SHORT NOW**, **WAIT FOR TRIGGER** (with the exact level), **WAIT FOR RETEST** (don't chase) or **NO TRADE**
+(with the reason). It is built from three open-source Claude skill packs, ported to 24/7 crypto, long and short:
+
+| # | Step | What it checks | Ported from |
+|---|---|---|---|
+| 1 | Market regime | 0–100 score: BTC trend structure (50/200-day stack + slope), the coin's own trend structure, perpetual funding, BTC drawdown & volatility. Trading against the regime halves the size. | `crypto-regime-analyzer` (tradermonty) |
+| 2 | Multi-timeframe analysis | The five agents and the Chief Strategist on three timeframes | `technical-analyst` + this app's agents |
+| 3 | Setup scanner | 20-candle closing-high breakout / low breakdown, bull & bear flags, reclaimed / lost the 20 average, oversold & overbought | `trader-scanner` (day-trader-skill) |
+| 4 | Entry timer | Opening-range breakout of the UTC day (1m–15m) and close beyond the 20-candle high/low. Only a **closed** candle beyond the level counts; a wick is not an entry. Says waiting (and how far), triggered (when, at what price), or expired. | `trader-entry` |
+| 5 | Exit plan | Stop set **before** the entry (range midpoint, behind the 10-candle swing, or 1.5 ATR), 1R / 2R / 3R targets. Refuses a stop under 0.05% (or 3× the spread) or over 8%. | `trader-exit`, `breakout-trade-planner` |
+| 6 | Time Machine | Replays the plan **10,000 times** from the coin's own candles (same time of day when there are 20+ days of history, seed 19), stop checked first, and re-runs the same rule on every past occasion it fired. Verdict against break-even, 1 in (1 + R): "close to a coin flip", "leans toward the target", "strongly toward the stop"… Fees included. | `trader-timemachine` |
+| 7 | Position size | Units = risk budget ÷ (risk per unit + fees), capped by your max leverage | `trader-budget`, `position-sizer` |
+| 8 | Risk manager | Stop set, loss ≤ max loss, reward:risk ≥ 1.5, stop width, daily loss (3× the per-trade risk), trades per day, no duplicate position, volatility not extreme | `trader-risk` |
+| 9 | Drawdown circuit breaker | Reads your demo account: daily 2% / weekly 5% / monthly 8% loss halts, and a cool-down after a losing streak (3 losses → 2 h intraday, 2 losses → 24 h on 1h+) | `drawdown-circuit-breaker` |
+| 10 | Pre-trade discipline gate | Written plan, stop before entry, size within plan, no revenge trade right after a loss (30 min intraday, 24 h on 1h+), breaker allows trading | `pre-trade-discipline-gate` |
+| 11 | Next-candle check | The agent council's next-candle call agrees or disagrees | this app |
+
+Then it tells you **how to enter**: the alert level, "wait for a 5m candle to CLOSE above X", the worst price you
+should accept (half the risk past the level), the stop, where to take half off and move the stop to break-even,
+the size and the most you can lose. A fan chart shows where the 10,000 replays ended. Tick **Alert me when it's time
+to enter** to get a sound and a browser notification when the plan turns to ENTER NOW, and **Load plan into demo trade**
+fills the demo order form (a limit order for a retest).
+
+The Time Machine port was checked against the day-trader-skill's own published example (real TSLA 5-minute bars,
+19 Oct 2026, entry 364.18 / stop 358.32 / target 370.04): the skill reports target first 29.4%, stop first 25.5%, median
+364.36 and "close to a coin flip"; this port gets 29.4%, 24.8%, 364.43 and the same verdict.
+
+The stock-only skills in those packs (13F copycat, Congress trades, SEC earnings, tax lots, rebalancing, dividend and
+CANSLIM screeners) need US-equity data and aren't part of this crypto site.
+
+```bash
+python -m crypto_agents plan BTCUSDT --tf 15m                 # the whole checklist in the terminal
+python -m crypto_agents plan SOLUSDT --tf 5m --side SHORT --target-r 3 --account 5000 --risk 0.5
+```
+
 ## How the agents work together on the next candle (the main screen)
 
 Pick a coin and a timeframe (e.g. **BTCUSDT · 1m**). At every candle close:
@@ -60,6 +98,7 @@ CLI: `python -m crypto_agents next BTCUSDT --tf 1m --watch` prints a new predict
 
 | Feature | Where |
 |---|---|
+| **Pro trade plan**: 11-step pre-trade checklist, exact entry / stop / targets / size, 10,000-replay Time Machine, alert when it's time to enter | Live tab (top), `/api/plan` |
 | Live TradingView chart (RSI + MACD) | Live tab |
 | Live order flow, updated **every second**: taker buy/sell pressure (10 s / 60 s), order-book imbalance, a 60-second pressure strip and a candle-close countdown | Live tab (Binance WebSocket, straight from your browser) |
 | **Next-candle prediction**: LONG/SHORT + % chance + STRONG/MODERATE/WEAK, candlestick patterns, pattern matching, auto-refresh at each candle close, live track record | Live tab (top), `/api/next` |
@@ -130,6 +169,7 @@ The live WebSocket runs in your browser, so it uses your own connection, not Ver
 ## Command line
 
 ```bash
+python -m crypto_agents plan BTCUSDT --tf 15m                 # pro trader checklist + where to enter
 python -m crypto_agents analyze BTCUSDT --tf 5m               # full analysis + measured odds
 python -m crypto_agents analyze SOLUSDT --tf 15m --account 5000 --risk 0.5
 python -m crypto_agents scan --tf 1h --top 30                  # rank the most traded coins
@@ -156,6 +196,7 @@ crypto_agents/
   strategist.py        combines the agents, picks a strategy, sets signal expiry
   odds.py              measured win/loss odds (look-ahead-free replay)
   forecast.py          next-candle prediction: agent council, Chief verdict, patterns, pattern matching, edge test
+  protrader.py         pro trade plan: regime, setups, entry timer, exit plan, Time Machine, sizing, risk, breaker, gate
   analysis.py          market overview, current position, candle analysis, strategies
   evaluate.py          walk-forward test of the Chief's calls on real candles
   ai.py                Claude chart-vision and senior-trader agents

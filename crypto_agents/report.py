@@ -86,3 +86,24 @@ def render_forecast(f: dict) -> str:
     out.append(f"  Entry {_fmt(p['entry'])} · stop {_fmt(p['stop_loss'])} · target {_fmt(p['take_profit'])} · {p['exit']}")
     out.append(f"  {DISCLAIMER}")
     return "\n".join(out)
+
+
+def render_plan(p: dict) -> str:
+    if p.get("error"):
+        return p["error"]
+    mark = {"PASS": "✔", "FAIL": "✖", "WARN": "!", "INFO": "·"}
+    out = ["=" * 72, f"  PRO TRADE PLAN  {p['symbol']} {p['timeframe']} ({p['score']})", "=" * 72,
+           f"  {p['action']}", f"  {p['headline']}", "",
+           f"  Entry {_fmt(p['entry'])} ({p['entry_kind']})   Stop {_fmt(p['stop'])}   "
+           f"Targets {' / '.join(_fmt(t) for t in p['targets'])}",
+           f"  Size {p['sizing']['units']:.6g} (≈ {p['sizing']['value']:,.2f} USDT, {p['sizing']['leverage']:g}x), "
+           f"max loss {p['sizing']['max_loss']:,.2f} USDT", "", "  How to enter:"]
+    out += [f"   {i}. {h}" for i, h in enumerate(p["how_to_enter"], 1)]
+    out.append("\n  Checklist:")
+    for s in p["steps"]:
+        out.append(f"   {mark[s['status']]} {s['title']} [{s['skill']}]: {s['summary']}")
+        out += [f"       - {d}" for d in s["details"]]
+    if p["warnings"]:
+        out += ["", "  Warnings:"] + [f"   ! {w}" for w in p["warnings"]]
+    out += ["", p["disclaimer"]]
+    return "\n".join(out)

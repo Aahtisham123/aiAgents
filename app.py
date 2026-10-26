@@ -15,6 +15,7 @@ from crypto_agents import Strategist, ai, data
 from crypto_agents.analysis import market_report
 from crypto_agents.forecast import next_candle
 from crypto_agents.odds import historical_odds
+from crypto_agents.protrader import build_plan
 from crypto_agents.report import DISCLAIMER
 from crypto_agents.web_page import PAGE
 
@@ -129,6 +130,37 @@ def analyze():
     return jsonify(_decision_json(d))
 
 
+def _daily_candles(a: dict, body: dict | None):
+    """Daily candles of the coin and of BTC for the market-regime check: the browser's, else the server's."""
+    if a["demo"]:
+        coin = data.synthetic_candles(n=420, seed=11, freq="1D")
+        return coin, coin if a["symbol"].startswith("BTC") else data.synthetic_candles(n=420, seed=5, freq="1D")
+    live = (body or {}).get("live") or {}
+
+    def get(key, symbol):
+        try:
+            if live.get(key):
+                return data.klines_to_df(live[key])
+            # the browser already tried Binance; don't make the (often geo-blocked) server try again
+            return None if live else data.fetch_klines(symbol, "1d", 400)
+        except Exception:  # noqa: BLE001 - the regime check degrades without it
+            return None
+    coin = get("daily", a["symbol"])
+    return coin, coin if a["symbol"].startswith("BTC") else get("btc_daily", "BTCUSDT")
+
+
+def _plan(a: dict, snap, d, forecast=None) -> dict:
+    body = (request.get_json(silent=True) if request.method == "POST" else None) or {}
+    src = body if request.method == "POST" else request.args
+    coin_daily, btc_daily = _daily_candles(a, body)
+    return build_plan(snap, d, forecast, account=a["account"], risk_pct=a["risk"],
+                      side=str(src.get("side", "AUTO")),
+                      target_r=min(max(float(src.get("target_r", 2)), 1), 5),
+                      max_leverage=min(max(float(src.get("max_leverage", 5)), 1), 125),
+                      coin_daily=coin_daily, btc_daily=btc_daily,
+                      journal=body.get("journal") if isinstance(body.get("journal"), dict) else None)
+
+
 @app.route("/api/next", methods=["GET", "POST"])
 @_errors
 def next_trade():
@@ -140,7 +172,21 @@ def next_trade():
     a, snap = _request_snapshot()
     d = Strategist(a["account"], a["risk"]).decide(snap)
     f = next_candle(snap, d)
-    return jsonify(_clean({"forecast": f, "decision": _decision_json(d), "report": market_report(snap, d, f)}))
+    out = {"forecast": f, "decision": _decision_json(d), "report": market_report(snap, d, f)}
+    try:
+        out["plan"] = _plan(a, snap, d, f)
+    except Exception as exc:  # noqa: BLE001 - the forecast is still useful without the plan
+        out["plan"] = {"error": f"Trade plan failed: {exc.__class__.__name__}: {exc}"}
+    return jsonify(_clean(out))
+
+
+@app.route("/api/plan", methods=["GET", "POST"])
+@_errors
+def plan():
+    """The pro trader's pre-trade checklist and an exact entry plan (see crypto_agents/protrader.py)."""
+    a, snap = _request_snapshot()
+    d = Strategist(a["account"], a["risk"]).decide(snap)
+    return jsonify(_clean(_plan(a, snap, d)))
 
 
 @app.route("/api/odds", methods=["GET", "POST"])

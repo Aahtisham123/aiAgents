@@ -5,7 +5,7 @@ from . import data
 from .backtest import backtest
 from .forecast import next_candle
 from .odds import historical_odds
-from .report import DISCLAIMER, render, render_forecast, render_odds
+from .report import DISCLAIMER, render, render_forecast, render_odds, render_plan
 from .strategist import Strategist
 
 
@@ -27,6 +27,13 @@ def main(argv=None) -> int:
     nx.add_argument("--demo", action="store_true")
     nx.add_argument("--watch", action="store_true", help="repeat at every candle close")
 
+    pl = sub.add_parser("plan", help="pro trader checklist: regime, setups, entry, exit, 10,000 replays, size, risk")
+    pl.add_argument("symbol")
+    pl.add_argument("--tf", default="15m", choices=list(data.PROFILES))
+    pl.add_argument("--side", default="AUTO", choices=["AUTO", "LONG", "SHORT"])
+    pl.add_argument("--target-r", type=float, default=2.0)
+    pl.add_argument("--demo", action="store_true")
+
     ev = sub.add_parser("evaluate", help="replay real candles and score the Chief's next-candle calls")
     ev.add_argument("--symbol", default="BTCUSDT")
     ev.add_argument("--tf", default="1m", choices=list(data.PROFILES))
@@ -45,7 +52,7 @@ def main(argv=None) -> int:
     b.add_argument("--demo", action="store_true", help="use synthetic data")
     b.add_argument("--target-r", type=float, default=2.0)
 
-    for sp in (a, nx, ev, s, b):
+    for sp in (a, nx, pl, ev, s, b):
         sp.add_argument("--account", type=float, default=1000.0, help="account size in USDT")
         sp.add_argument("--risk", type=float, default=1.0, help="%% of account risked per trade")
     args = p.parse_args(argv)
@@ -75,6 +82,22 @@ def main(argv=None) -> int:
                 return 0
             step = data.TF_SECONDS[args.tf]
             time.sleep(step - time.time() % step + 1)
+
+    if args.cmd == "plan":
+        from .protrader import build_plan
+        sym = args.symbol.upper()
+        if args.demo:
+            snap = data.demo_snapshot(sym, args.tf)
+            coin = data.synthetic_candles(n=420, seed=11, freq="1D")
+            btc = coin if sym.startswith("BTC") else data.synthetic_candles(n=420, seed=5, freq="1D")
+        else:
+            snap = data.fetch_snapshot(sym, args.tf, limit=1000)
+            coin = data.fetch_klines(sym, "1d", 400)
+            btc = coin if sym.startswith("BTC") else data.fetch_klines("BTCUSDT", "1d", 400)
+        d = strat.decide(snap)
+        print(render_plan(build_plan(snap, d, next_candle(snap, d), account=args.account, risk_pct=args.risk,
+                                     side=args.side, target_r=args.target_r, coin_daily=coin, btc_daily=btc)))
+        return 0
 
     if args.cmd == "evaluate":
         from .evaluate import evaluate
